@@ -1740,7 +1740,10 @@ write-ahead logging.
     committed at or before the horizon, none is a deletion, and no
     version it superseded awaits collection; a commit past the horizon
     leaves it to be looked at again. Collecting its last such version,
-    or taking a deletion out, unsettles it. Kept in memory alone: an
+    or taking a deletion out, unsettles it. A zone known and not stale,
+    changed since by inserts alone, is settled from its rows' newest
+    versions alone, none decoded, its bounds and row count kept as the
+    inserts made them (`bench/maintenance.rs`). Kept in memory alone: an
     opened table's zones are all unsettled, and opening asks for the
     maintenance that settles them.
 - **Zones saved.** Kept in memory, each locked alone, and with the

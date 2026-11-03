@@ -436,7 +436,8 @@ use visible::Seen;
 // Unit tests: zones skip blocks, keep old versions for open readers, are
 // known only once summed up after a table is opened or as a checkpoint
 // saved them, hold every row written while they are summed up, hold a
-// version put back, are narrowed after an insert is undone, and are
-// summed up as the undo store is truncated (RULES.md R-TEST-1, R-TEST-7).
+// version put back, are narrowed after an insert is undone, are summed
+// up as the undo store is truncated, and are settled, of inserts alone,
+// without reading their rows (RULES.md R-TEST-1, R-TEST-7).
 #[cfg(test)]
 mod tests;

@@ -172,3 +172,8 @@ harness = false
 name = "assertions"
 path = "bench/assertions.rs"
 harness = false
+
+[[bench]]
+name = "maintenance"
+path = "bench/maintenance.rs"
+harness = false
