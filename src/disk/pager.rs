@@ -476,37 +476,37 @@ impl Pager {
 
     /// Reads the content of page `id` into `content`, replacing what it
     /// held: from the page, and from its overflow pages if it has any,
-    /// decoded by the file's pipeline. A
-    /// page never written has no content.
+    /// decoded by the file's pipeline. A page never written has no content.
+    /// The page is read into `content` itself, verified and its header cut
+    /// off there, so a read of plain content into a buffer of a page's size
+    /// allocates nothing.
     ///
     /// # Errors
     ///
     /// SQLCODE -910 if the page is not allocated, or is one of the pager's
     /// own; SQLCODE -916 if a page fails its checksum, holds another page's
     /// number, or is malformed; SQLCODE -915 if the file cannot be read.
+    /// What `content` holds then is of no use.
     pub fn read(&self, id: PageId, content: &mut Vec<u8>) -> Result<()> {
         self.check_in_use(id)?;
         add(&self.counters.reads, 1);
-        content.clear();
-        let Some(body) = self.read_body(id.0)? else {
+        if !self.body_into(id.0, content)? {
             add(&self.counters.new_reads, 1);
             self.known.set(id.0, &[]);
             return Ok(());
-        };
-        self.check_data(id, &body)?;
-        let header = format::data_header(&body).ok_or_else(|| self.damaged("a data page is malformed"))?;
+        }
+        self.check_data(id, content)?;
+        let header = format::data_header(content).ok_or_else(|| self.damaged("a data page is malformed"))?;
         // Known without reading anything else: no overflow, or only what it
         // lists itself.
         if header.directory == NONE {
             self.known.set(id.0, &header.extents);
         }
+        self.keep_content(content)?;
         if self.pipeline.plain(&header.ids) {
-            return self.load(&body, content);
+            return Ok(());
         }
-        let mut stored = Vec::new();
-        self.load(&body, &mut stored)?;
-        content.extend_from_slice(&self.pipeline.decode(id.0, &header.ids, &stored)?);
-        Ok(())
+        self.pipeline.decode_in_place(id.0, &header.ids, content)
     }
 
     /// Writes `content`, of any length, as the content of page `id`, in

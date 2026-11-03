@@ -41,8 +41,8 @@ impl Pager {
         if !header.extents.is_empty() || header.directory != NONE {
             return None;
         }
-        let mut stored = Vec::new();
-        self.load(body, &mut stored).ok()?;
+        let mut stored = body.to_vec();
+        self.keep_content(&mut stored).ok()?;
         self.known.set(id.0, &[]);
         add(&self.counters.reads, 1);
         if self.pipeline.plain(&header.ids) {

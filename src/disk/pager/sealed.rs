@@ -72,11 +72,25 @@ impl Pager {
 
     /// The body of page `id`; `None` if it was never written.
     pub(super) fn read_body(&self, id: u64) -> Result<Option<Vec<u8>>> {
+        let mut body = Vec::new();
+        Ok(self.body_into(id, &mut body)?.then_some(body))
+    }
+
+    /// Reads the body of page `id` into `body`, replacing what it held:
+    /// the page is read into it and verified where it lies, then its
+    /// trailer cut off, so a read makes no buffer of its own. Whether the
+    /// page was ever written; if not, `body` is left empty.
+    pub(super) fn body_into(&self, id: u64, body: &mut Vec<u8>) -> Result<bool> {
         if id >= self.on_file.load(Ordering::Acquire) {
-            return Ok(None);
+            body.clear();
+            return Ok(false);
         }
-        let page = self.read_run(id, 1)?;
-        Ok(self.unseal(id, &page)?.map(<[u8]>::to_vec))
+        // What `body` held is read over, so only bytes past it are zeroed.
+        body.resize(self.page_size, 0);
+        self.file.read_exact_at(body, self.offset(id)?)?;
+        let written = self.unseal(id, body)?.map(<[u8]>::len);
+        body.truncate(written.unwrap_or_default());
+        Ok(written.is_some())
     }
 
     /// The bytes of `count` pages from `start`, in one read.
@@ -96,3 +110,6 @@ impl Pager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

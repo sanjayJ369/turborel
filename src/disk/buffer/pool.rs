@@ -29,7 +29,7 @@ pub use ahead::READ_AHEAD_PAGES;
 use super::{BufferPool, Clock, Counters, Eviction, FileId, Frame, Key, PageMut, PageRef, Pin, PoolCounts, SHARDS, Shard, Source, count};
 use crate::disk::block::{BlockFile, BlockId};
 use crate::disk::io::Durability;
-use crate::disk::pager::{Extent, PageId, Pager};
+use crate::disk::pager::{Extent, MAX_PAGE_SIZE, PageId, Pager};
 use crate::error::{Code, Result, SqlError};
 use crate::hash::murmur::MurmurMap;
 use crate::memory::MemoryBudget;
@@ -428,8 +428,14 @@ impl BufferPool {
     /// and the error returned.
     fn fill(&self, key: Key, claim: Claim, fill: Fill) -> Result<&Frame> {
         let frame = self.frame(claim.frame)?;
-        self.emptied(key, claim)?;
-        let mut content = Vec::new();
+        // The old page's buffer is read into, so a miss allocates nothing;
+        // one larger than the largest page, of content that overflowed, is
+        // let go, so a frame holds no more memory than its page needs.
+        let mut content = self.emptied(key, claim)?;
+        if content.capacity() > usize::try_from(MAX_PAGE_SIZE).unwrap_or(usize::MAX) {
+            content = Vec::new();
+        }
+        content.clear();
         if fill == Fill::Read {
             count(&self.counters.misses);
             if let Err(e) = self.read_into(key, &mut content) {
@@ -445,9 +451,9 @@ impl BufferPool {
     }
 
     /// Empties `claim`'s frame, claimed for `key`, writing back what it
-    /// held if it must. If that fails, the frame is put back as it was and
-    /// the error returned.
-    fn emptied(&self, key: Key, claim: Claim) -> Result<()> {
+    /// held if it must; the buffer it held. If that fails, the frame is put
+    /// back as it was and the error returned.
+    fn emptied(&self, key: Key, claim: Claim) -> Result<Vec<u8>> {
         let frame = self.frame(claim.frame)?;
         let old_content = mem::take(&mut *frame.content.write().unwrap_or_else(PoisonError::into_inner));
         if let Some(old) = claim.write_back {
@@ -462,7 +468,7 @@ impl BufferPool {
                 map.remove(&old);
             }
         }
-        Ok(())
+        Ok(old_content)
     }
 
     /// Reads `key` from its file into `content`.

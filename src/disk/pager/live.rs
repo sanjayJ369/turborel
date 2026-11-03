@@ -145,6 +145,27 @@ impl Encoded {
             }
         }
     }
+
+    /// `page`, as `decode` takes `input`, decoded where it lies: what
+    /// decoding leaves as it was, all or part, is kept in its place, with
+    /// no copy made.
+    ///
+    /// # Errors
+    ///
+    /// As `decode`'s; what `page` holds then is of no use.
+    pub(super) fn decode_in_place(&self, context: u64, ids: &[EncodingId], page: &mut Vec<u8>) -> Result<()> {
+        let (at, len) = match self.decode(context, ids, page)? {
+            Cow::Owned(decoded) => {
+                *page = decoded;
+                return Ok(());
+            }
+            // Borrowed from `page`, so it lies within it.
+            Cow::Borrowed(part) => (part.as_ptr().addr().saturating_sub(page.as_ptr().addr()), part.len()),
+        };
+        page.truncate(at.saturating_add(len));
+        page.drain(..at.min(page.len()));
+        Ok(())
+    }
 }
 
 impl Live {
