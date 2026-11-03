@@ -32,7 +32,7 @@ mod sync;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 
 pub use format::FORMAT_VERSION;
 use format::{KIND_DATA, KIND_NEW, KIND_TRUNK, META_AT, Meta, NONE};
@@ -45,7 +45,7 @@ use super::encoding::{Encoding, LivePipeline, Pipeline};
 use super::io::{DiskFile, Durability, FileSystem, OpenMode, begin_file};
 use crate::error::{Code, Result, SqlError};
 use crate::hash::{HashFunction, HashId};
-use crate::sync::lock_builtin;
+use crate::sync::{Signal, lock_builtin};
 
 /// \[DESIGN\] The smallest page size: a modern disk sector, and room in the
 /// header page for the two meta slots in sectors of their own.
@@ -159,7 +159,7 @@ pub struct Pager {
     on_file: AtomicU64,
     sync_state: Mutex<SyncState>,
     /// Signalled when a sync ends.
-    synced: Condvar,
+    synced: Signal,
     counters: Counters,
     /// The overflow of the pages it read or wrote (`known.rs`).
     known: known::Known,
@@ -288,7 +288,7 @@ impl Pager {
             free: Mutex::new(FreeList::new(0)),
             on_file: AtomicU64::new(0),
             sync_state: Mutex::new(SyncState { running: false, sequence: 0, trunk: Vec::new() }),
-            synced: Condvar::new(),
+            synced: Signal::new(),
             counters: Counters::default(),
             known: known::Known::new(),
         }

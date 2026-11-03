@@ -3,7 +3,7 @@
 //! settings reached through Rust. Split from db.rs (RULES.md R-SIZE-2).
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, PoisonError, RwLock, Weak};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 use std::thread::{self, ThreadId};
 
 mod handles;
@@ -29,7 +29,7 @@ use crate::physical::CostModel;
 use crate::settings;
 use crate::spill::Spill;
 use crate::storage::StorageEngine;
-use crate::sync::{lock, read, write};
+use crate::sync::{Signal, lock, read, write};
 use crate::txn::{Damage, LockMode, LockWait, Policy, SessionEnd, Txn};
 use crate::value::Value;
 
@@ -62,7 +62,7 @@ struct Shared {
     /// The thread changing the definitions, if one is; changes take turns.
     changing: Mutex<Option<ThreadId>>,
     /// Signalled when a change ends, for a thread waiting its turn.
-    turn_ended: Condvar,
+    turn_ended: Signal,
     /// The files it was opened from, if any (`db/files.rs`).
     files: Mutex<Option<Arc<DatabaseFiles>>>,
     /// Set once it is closed: every call is then refused.
@@ -126,7 +126,7 @@ impl Database {
         let db = Program::over(|program| Shared {
             current: RwLock::new(Arc::new(state)),
             changing: Mutex::new(None),
-            turn_ended: Condvar::new(),
+            turn_ended: Signal::new(),
             files: Mutex::new(None),
             closed: AtomicBool::new(false),
             diagnostics: RwLock::new(Arc::new(NoDiagnostics)),

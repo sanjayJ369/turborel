@@ -59,7 +59,7 @@ use crate::disk::encoding::{Encoding, Pipeline};
 use crate::disk::io::{Durability, FileSystem};
 use crate::error::{Code, Result, SqlError};
 use crate::hash::HashFunction;
-use crate::sync::lock_builtin;
+use crate::sync::{Signal, lock_builtin};
 
 mod open;
 mod segments;
@@ -128,7 +128,7 @@ struct Segment {
     /// Appends that took this segment and have not finished.
     in_flight: AtomicUsize,
     idle: Mutex<()>,
-    drained: Condvar,
+    drained: Signal,
     /// Every block before this offset is durable.
     durable_end: AtomicU64,
     /// Whether it was ended, all its appends finished, and synced.
@@ -244,7 +244,7 @@ impl Segment {
             blocks,
             in_flight: AtomicUsize::new(0),
             idle: Mutex::new(()),
-            drained: Condvar::new(),
+            drained: Signal::new(),
             durable_end: AtomicU64::new(HEADER_LEN),
             sealed: AtomicBool::new(false),
         })
