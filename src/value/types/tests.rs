@@ -222,3 +222,44 @@ fn varying_keys_order_as_strings_compare() {
         }
     }
 }
+
+/// Verifies: [X3.135-1986 §8.7 GR7b] a CHARACTER(4) value read from its
+/// record is padded with spaces to the length, of ASCII characters and of
+/// characters of more than one byte in UTF-8 alike (four characters, not
+/// four bytes), and the empty string to four spaces; a record of more
+/// characters than the length is no value of the type. Each is written
+/// without its trailing spaces.
+#[test]
+fn character_records_read_padded_to_the_length() {
+    let t = DataType::Character { length: 4 };
+    let read = |field: &str| t.decode_record(field.as_bytes()).map(|v| v.to_string());
+    assert_eq!(read("ab").as_deref(), Some("ab  "));
+    assert_eq!(read("abcd").as_deref(), Some("abcd"));
+    assert_eq!(read("").as_deref(), Some("    "));
+    assert_eq!(read("é\u{10000}").as_deref(), Some("é\u{10000}  "));
+    assert_eq!(read("aéé\u{FFFF}").as_deref(), Some("aéé\u{FFFF}"));
+    assert_eq!(read("abcde"), None);
+    assert_eq!(read("ééééé"), None);
+    for s in ["ab", "é\u{10000}", ""] {
+        let field = t.encode_record(&Value::Char(format!("{s}  "))).unwrap();
+        assert_eq!(field, s.as_bytes(), "{s:?} is written without its trailing spaces");
+    }
+}
+
+/// Verifies: [X3.135-1986 §5.11 GR5] a CHARACTER(4) key is its UTF-8
+/// padded with spaces to four characters, of ASCII characters and of
+/// characters of more than one byte alike; a value of more characters
+/// than the length has no key.
+#[test]
+fn character_keys_pad_to_the_length() {
+    let t = DataType::Character { length: 4 };
+    let key = |s: &str| {
+        let mut out = Vec::new();
+        t.encode_key(&Value::Char(s.to_owned()), &mut out).map(|()| out)
+    };
+    assert_eq!(key("ab").unwrap(), b"ab  ");
+    assert_eq!(key("é\u{10000}").unwrap(), "é\u{10000}  ".as_bytes());
+    assert_eq!(key("ééé").unwrap(), "ééé ".as_bytes());
+    assert_eq!(code(key("abcde")), Some(Code::Api));
+    assert_eq!(code(key("ééééé")), Some(Code::Api));
+}
