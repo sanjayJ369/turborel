@@ -1,7 +1,8 @@
 //! How fast the pager reads and writes pages (RULES.md D30): writes and
 //! reads of default-size pages, in order and scattered, on one and on
 //! several threads; contents that overflow one page; writes each
-//! followed by a sync; and, with `UNCACHED_VAR` set, scattered reads of
+//! followed by a sync; pages freed one at a time, scattered; and, with
+//! `UNCACHED_VAR` set, scattered reads of
 //! pages the system's cache does not hold, of a file larger than the
 //! machine's memory, written first. Run with `cargo xtask bench`, on the
 //! harness (RULES.md R-BENCH-1).
@@ -21,7 +22,7 @@ mod harness;
 
 use harness::{Bench, Case, on_threads, scatter};
 use turborel::disk::io::Durability;
-use turborel::disk::pager::{DEFAULT_PAGE_SIZE, PageId, Pager};
+use turborel::disk::pager::{DEFAULT_PAGE_SIZE, Extent, PageId, Pager};
 
 /// Pages in the file: 256 MiB of default-size pages.
 const PAGES: u64 = 32 * 1024;
@@ -39,6 +40,8 @@ const UNCACHED_VAR: &str = "TURBOREL_BENCH_UNCACHED_GIB";
 const UNCACHED_READS: u64 = 4_000;
 /// Threads writing the file of `uncached`.
 const UNCACHED_WRITERS: usize = 4;
+/// Pages written, then freed one at a time, per run of `freed`.
+const FREED_PAGES: u64 = 4096;
 
 /// A pass over every page.
 #[derive(Clone, Copy)]
@@ -95,7 +98,33 @@ fn main() {
         });
     }
     drop(pager);
+    freed(&bench);
     uncached(&bench);
+}
+
+/// \[DESIGN\] Pages freed one at a time, in a scattered order, as a spilled
+/// run frees them (RULES.md D38): each free checks the pages against the
+/// free list, which holds more runs as more are freed. Each run frees the
+/// pages of a file of its own, made and written first, untimed.
+fn freed(bench: &Bench) {
+    bench.measure_fresh(
+        Case::new("free, pages scattered", "pages").bytes(DEFAULT_PAGE_SIZE as usize),
+        || {
+            let pager = bench.pager("freed");
+            pager.allocate(FREED_PAGES);
+            let payload = vec![9_u8; pager.inline_capacity()];
+            for n in 0..FREED_PAGES {
+                pager.write(PageId(n), &payload).unwrap();
+            }
+            pager
+        },
+        |pager| {
+            for n in 0..FREED_PAGES {
+                pager.free(&[Extent { start: PageId(scatter(n, FREED_PAGES)), count: 1 }]).unwrap();
+            }
+            FREED_PAGES
+        },
+    );
 }
 
 /// \[DESIGN\] Scattered reads of pages the system's cache does not hold

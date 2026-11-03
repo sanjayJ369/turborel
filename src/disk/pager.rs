@@ -355,7 +355,7 @@ impl Pager {
     /// one of the pager's own (overflow, directory or free-list pages);
     /// nothing is freed then. SQLCODE -915 if a freed page cannot be zeroed.
     pub fn free(&self, extents: &[Extent]) -> Result<()> {
-        self.free.read().clone().free(extents).map_err(|why| SqlError::new(Code::Api, format!("[DESIGN] cannot free: {why}")))?;
+        self.free.read().check_free(extents).map_err(|why| SqlError::new(Code::Api, format!("[DESIGN] cannot free: {why}")))?;
         let mut all = extents.to_vec();
         for e in extents {
             for id in e.start.0..e.start.0.saturating_add(e.count) {
