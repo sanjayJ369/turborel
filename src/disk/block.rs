@@ -10,8 +10,11 @@
 //! block is published (readable, and counted in `end`) once every block
 //! before it is written, so readers never meet a gap; an appender waits
 //! only for earlier appenders to finish, and holds no lock while it hashes
-//! or writes (RULES.md R-ERR-4). Batching blocks is for the components
-//! above, which know what belongs together.
+//! or writes (RULES.md R-ERR-4). It waits by checking a few times, then
+//! yielding the processor for a bounded while, as an earlier write takes
+//! a few microseconds, and only then parking until woken, which costs far
+//! more (`publish.rs`). Batching blocks is for the components above, which
+//! know what belongs together.
 //!
 //! A write that fails leaves a gap the blocks after it cannot be reached
 //! across, so the file then refuses appends until it is reopened, which
