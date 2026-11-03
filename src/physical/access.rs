@@ -163,7 +163,8 @@ impl PhysicalPlanner<'_> {
                     continue;
                 }
                 let distinct = || self.db.distinct_keys(read.table, &**found);
-                let (est, probed_cost) = priced((&**found, &distinct), &c, (all, types.len(), cost.index_descent), &**storage);
+                let asked: (_, &dyn Fn() -> Option<f64>, _) = (&**found, &distinct, ix.unique);
+                let (est, probed_cost) = priced(asked, &c, (all, types.len(), cost.index_descent), &**storage);
                 // Of a covering index, the rows its table says every reader
                 // sees are made of their entries, not fetched (RULES.md D34).
                 let visible = covers(&**kind, (&ix.columns, &types), read.needed).then(|| storage.visible_share()).flatten();
@@ -185,14 +186,16 @@ impl PhysicalPlanner<'_> {
 
 /// The rows `c`'s probes of `index` are estimated to find, and their cost,
 /// of a table of `all` rows in `storage`, the index `width` columns wide,
-/// a level of a tree costing `descent`: the index's count of each probe's
-/// if cheap; else, for an equality on all its columns, the rows over its
-/// distinct keys, `distinct` asks the index for (`State::distinct_keys`);
-/// else the guess, shared by the probes. Its pages to find the entries, if
-/// it knows, else a tree's levels; and those the pool misses, as the
-/// table's fetches' pages missed cost.
+/// a level of a tree costing `descent`: of an index of a UNIQUE
+/// constraint (`unique`), one row for an equality on all its columns, as
+/// its key holds no more, the index not asked; else the index's count of
+/// each probe's if cheap; else, for an equality on all its columns, the
+/// rows over its distinct keys, `distinct` asks the index for
+/// (`State::distinct_keys`); else the guess, shared by the probes. Its
+/// pages to find the entries, if it knows, else a tree's levels; and
+/// those the pool misses, as the table's fetches' pages missed cost.
 fn priced(
-    (index, distinct): (&dyn Index, &dyn Fn() -> Option<f64>),
+    (index, distinct, unique): (&dyn Index, &dyn Fn() -> Option<f64>, bool),
     c: &Candidate,
     (all, width, descent): (f64, usize, f64),
     storage: &dyn TableStorage,
@@ -203,7 +206,11 @@ fn priced(
     let (mut est, mut found) = (0.0_f64, 0.0_f64);
     for probe in &c.probes {
         let by_keys = || distinct().filter(|_| whole_key(probe, width)).map(|d| all / d.max(1.0_f64));
-        est += index.estimate(probe).map(cost_of).or_else(by_keys).unwrap_or(share);
+        // The index's count searches for the key, as costly as the probe
+        // it prices: a unique key's equality needs none (RULES.md D35).
+        let counted = || index.estimate(probe).map(cost_of);
+        let alone = (unique && whole_key(probe, width)).then_some(1.0_f64);
+        est += alone.or_else(counted).or_else(by_keys).unwrap_or(share);
         found += index.probe_pages(probe).map_or(levels, |pages| descent * pages) + missed;
     }
     (est, found + est * storage.fetch_cost())
