@@ -5,14 +5,15 @@
 //! a failed write forgets its page.
 //!
 //! A page known to have no overflow, as most are, takes a bit; one known to
-//! have some, its extents. The pages are spread over shards by number, so
-//! threads writing different pages seldom wait for each other.
+//! have some, its extents. The pages are spread over shards by number, each
+//! on cache lines of its own, so threads writing different pages seldom
+//! wait for each other; a shard is locked shared to look, and a page read
+//! again, known to have no overflow still, takes no exclusive lock.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::Extent;
-use crate::sync::lock_builtin;
 
 /// \[DESIGN\] Shards of the knowledge: more than the threads that write at
 /// once, so they seldom share one.
@@ -29,6 +30,25 @@ struct Shard {
     spilled: HashMap<u64, Vec<Extent>>,
 }
 
+/// A shard alone on its cache lines, so threads using different shards
+/// never write one line.
+#[repr(align(128))]
+#[derive(Default)]
+struct Padded(RwLock<Shard>);
+
+impl Padded {
+    /// The shard, locked shared. No plug-in is called while it is held, so
+    /// a poisoned one is used as it is.
+    fn read(&self) -> RwLockReadGuard<'_, Shard> {
+        self.0.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The shard, locked exclusively; as `read`.
+    fn write(&self) -> RwLockWriteGuard<'_, Shard> {
+        self.0.write().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 /// The shard of page `id`, its place in it, and its bit's word and mask.
 fn place(id: u64) -> (usize, u64, usize, u64) {
     let shard = usize::try_from(id.checked_rem(SHARDS).unwrap_or_default()).unwrap_or_default();
@@ -39,31 +59,36 @@ fn place(id: u64) -> (usize, u64, usize, u64) {
 
 /// What the pager knows of its pages' overflow.
 pub(super) struct Known {
-    shards: Vec<Mutex<Shard>>,
+    shards: Vec<Padded>,
 }
 
 impl Known {
     /// Knowing nothing.
     pub(super) fn new() -> Known {
-        Known { shards: (0..SHARDS).map(|_| Mutex::default()).collect() }
+        Known { shards: (0..SHARDS).map(|_| Padded::default()).collect() }
     }
 
     /// The overflow and directory pages page `id` is known to have, none
     /// if it is known to have none; `None` if nothing is known of it.
     pub(super) fn of(&self, id: u64) -> Option<Vec<Extent>> {
         let (shard, slot, word, mask) = place(id);
-        let shard = lock_builtin(self.shards.get(shard)?);
+        let shard = self.shards.get(shard)?.read();
         if let Some(extents) = shard.spilled.get(&slot) {
             return Some(extents.clone());
         }
-        shard.plain.get(word).is_some_and(|w| w & mask != 0).then(Vec::new)
+        plain(&shard, word, mask).then(Vec::new)
     }
 
     /// Page `id` has `overflow`: its overflow and directory pages.
     pub(super) fn set(&self, id: u64, overflow: &[Extent]) {
         let (shard, slot, word, mask) = place(id);
         let Some(shard) = self.shards.get(shard) else { return };
-        let mut shard = lock_builtin(shard);
+        // Known so already, as a page read again is: nothing changes.
+        let known = overflow.is_empty() && plain(&shard.read(), word, mask);
+        if known {
+            return;
+        }
+        let mut shard = shard.write();
         if overflow.is_empty() {
             shard.spilled.remove(&slot);
             if shard.plain.len() <= word {
@@ -82,10 +107,16 @@ impl Known {
     pub(super) fn forget(&self, id: u64) {
         let (shard, slot, word, mask) = place(id);
         let Some(shard) = self.shards.get(shard) else { return };
-        let mut shard = lock_builtin(shard);
+        let mut shard = shard.write();
         shard.spilled.remove(&slot);
         clear(&mut shard, word, mask);
     }
+}
+
+/// Whether the bit `mask` of word `word` of `shard` is set: its page known
+/// to have no overflow.
+fn plain(shard: &Shard, word: usize, mask: u64) -> bool {
+    shard.plain.get(word).is_some_and(|w| w & mask != 0)
 }
 
 /// Clears the bit `mask` of word `word` of `shard`.
@@ -120,5 +151,26 @@ mod tests {
         known.forget(5 + SHARDS * 200);
         known.forget(u64::MAX);
         assert_eq!((known.of(5), known.of(5 + SHARDS * 200)), (None, None));
+    }
+
+    /// Verifies: [DESIGN] RULES.md D30: a page set with no overflow is left
+    /// as it is, with no exclusive lock, only if it is known so already;
+    /// MC/DC of `overflow.is_empty() && plain`: (no overflow, plain) is left
+    /// plain; (overflow, plain) becomes spilled, so the overflow flips the
+    /// outcome; (no overflow, not plain: unknown, or spilled) becomes
+    /// plain, so the bit flips it.
+    #[test]
+    fn a_page_known_plain_is_set_again_with_no_change() {
+        let known = Known::new();
+        let extents = vec![Extent { start: PageId(9), count: 2 }];
+        known.set(7, &[]);
+        known.set(7, &[]);
+        assert_eq!(known.of(7), Some(Vec::new()), "no overflow, plain: left plain");
+        known.set(7, &extents);
+        assert_eq!(known.of(7), Some(extents.clone()), "overflow, plain: spilled");
+        known.set(7, &[]);
+        assert_eq!(known.of(7), Some(Vec::new()), "no overflow, spilled: plain");
+        known.set(8, &[]);
+        assert_eq!(known.of(8), Some(Vec::new()), "no overflow, unknown: plain");
     }
 }

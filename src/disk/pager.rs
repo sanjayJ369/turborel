@@ -115,7 +115,8 @@ pub struct Pager {
     /// written, so the next sync writes the slot again, keyed anew.
     resettled: AtomicBool,
     page_size: usize,
-    free: Mutex<FreeList>,
+    /// The free list, its page count read with no lock (`free.rs`).
+    free: free::Shared,
     /// Pages written to the file: past them a page reads as new.
     on_file: AtomicU64,
     sync_state: Mutex<SyncState>,
@@ -228,7 +229,7 @@ impl Pager {
         pager.hash = keyed;
         pager.settled = Mutex::new(Formats { encodings: ids, key });
         pager.pipeline = Encoded::Named(Named::new(pipeline, encodings, path));
-        *lock_builtin(&pager.free) = FreeList::new(meta.pages);
+        *pager.free.write() = FreeList::new(meta.pages);
         lock_builtin(&pager.sync_state).sequence = meta.sequence;
         pager.on_file.store(on_file, Ordering::Release);
         pager.load_free_list(meta, on_file)?;
@@ -246,7 +247,7 @@ impl Pager {
             settled: Mutex::new(Formats::default()),
             resettled: AtomicBool::new(false),
             page_size,
-            free: Mutex::new(FreeList::new(0)),
+            free: free::Shared::new(FreeList::new(0)),
             on_file: AtomicU64::new(0),
             sync_state: Mutex::new(SyncState { running: false, sequence: 0, trunk: Vec::new() }),
             synced: Signal::new(),
@@ -272,7 +273,7 @@ impl Pager {
             runs.extend(entries);
             next = after;
         }
-        let mut free = lock_builtin(&self.free);
+        let mut free = self.free.write();
         free.free(&runs).map_err(|why| self.damaged(&format!("its free list is wrong: {why}")))?;
         free.grow_free(on_file).map_err(|why| self.damaged(&format!("its free list is wrong: {why}")))?;
         drop(free);
@@ -299,12 +300,12 @@ impl Pager {
 
     /// Pages in the file, free ones included.
     pub fn page_count(&self) -> u64 {
-        lock_builtin(&self.free).pages()
+        self.free.pages()
     }
 
     /// Free pages.
     pub fn free_pages(&self) -> u64 {
-        lock_builtin(&self.free).free_pages()
+        self.free.read().free_pages()
     }
 
     /// The id of the hash function that checksums the pages.
@@ -341,7 +342,7 @@ impl Pager {
     /// are, consecutive where it can, new ones at the end otherwise. They
     /// read as new, with no content, until written.
     pub fn allocate(&self, count: u64) -> Vec<Extent> {
-        lock_builtin(&self.free).allocate(count)
+        self.free.write().allocate(count)
     }
 
     /// Frees the pages of `extents`, and any overflow pages of their
@@ -354,7 +355,7 @@ impl Pager {
     /// one of the pager's own (overflow, directory or free-list pages);
     /// nothing is freed then. SQLCODE -915 if a freed page cannot be zeroed.
     pub fn free(&self, extents: &[Extent]) -> Result<()> {
-        lock_builtin(&self.free).clone().free(extents).map_err(|why| SqlError::new(Code::Api, format!("[DESIGN] cannot free: {why}")))?;
+        self.free.read().clone().free(extents).map_err(|why| SqlError::new(Code::Api, format!("[DESIGN] cannot free: {why}")))?;
         let mut all = extents.to_vec();
         for e in extents {
             for id in e.start.0..e.start.0.saturating_add(e.count) {
@@ -381,7 +382,7 @@ impl Pager {
     /// other pages, can be followed, and freed content does not linger.
     fn release(&self, extents: &[Extent]) -> Result<()> {
         self.zero_all(extents)?;
-        lock_builtin(&self.free).free(extents).map_err(|why| SqlError::new(Code::Api, format!("[DESIGN] cannot free: {why}")))
+        self.free.write().free(extents).map_err(|why| SqlError::new(Code::Api, format!("[DESIGN] cannot free: {why}")))
     }
 
     /// Zeroes the pages of `extents`.
@@ -406,13 +407,14 @@ impl Pager {
         Ok(())
     }
 
-    /// Checks that page `id` is in use, as `read` and `write` need.
+    /// Checks that page `id` is in use, as `read` and `write` need: with no
+    /// lock taken but the free list's shared one, so reads run together.
     fn check_in_use(&self, id: PageId) -> Result<()> {
-        let free = lock_builtin(&self.free);
-        if id.0 >= free.pages() || free.is_free(id.0) {
+        let pages = self.free.pages();
+        if id.0 >= pages || self.free.read().is_free(id.0) {
             return Err(SqlError::new(
                 Code::Api,
-                format!("[DESIGN] page {} of {} is not allocated: its file has {} pages", id.0, self.path.display(), free.pages()),
+                format!("[DESIGN] page {} of {} is not allocated: its file has {pages} pages", id.0, self.path.display()),
             ));
         }
         Ok(())
@@ -433,9 +435,9 @@ impl Pager {
     /// What `content` holds then is of no use.
     pub fn read(&self, id: PageId, content: &mut Vec<u8>) -> Result<()> {
         self.check_in_use(id)?;
-        add(&self.counters.reads, 1);
+        self.counters.count(|s| &s.reads, 1);
         if !self.body_into(id.0, content)? {
-            add(&self.counters.new_reads, 1);
+            self.counters.count(|s| &s.new_reads, 1);
             self.known.set(id.0, &[]);
             return Ok(());
         }
@@ -490,9 +492,9 @@ impl Pager {
             return Err(e);
         }
         self.known.set(id.0, &allocated);
-        add(&self.counters.writes, 1);
-        add(&self.counters.content_bytes, u64::try_from(content.len()).unwrap_or(u64::MAX));
-        add(&self.counters.stored_bytes, u64::try_from(stored.len()).unwrap_or(u64::MAX));
+        self.counters.count(|s| &s.writes, 1);
+        self.counters.count(|s| &s.content_bytes, u64::try_from(content.len()).unwrap_or(u64::MAX));
+        self.counters.count(|s| &s.stored_bytes, u64::try_from(stored.len()).unwrap_or(u64::MAX));
         // Nothing refers to the old overflow pages any longer.
         self.release(&old)
     }

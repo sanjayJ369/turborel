@@ -9,10 +9,77 @@
 //! that holds the request; failing that, if the free pages hold it, free
 //! runs largest first; failing that, every free run, the one at the end of
 //! the file (if there is one) last and grown, so the new pages continue it.
+//!
+//! The pager keeps it behind a lock that reads of pages take shared, to
+//! check the page read is not free, and its page count beside it, set by
+//! every change as the lock is let go, so a read checks its page is in the
+//! file with no lock (`Shared`).
 
 use std::collections::BTreeMap;
+use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::{Extent, PageId};
+
+/// \[DESIGN\] The pager's free list, shared between its threads: reads of
+/// pages look at it together, and only allocating and freeing change it.
+/// Its page count is kept in an atomic too, read with no lock. No plug-in
+/// is called while it is locked, so a poisoned lock is used as it is.
+pub(super) struct Shared {
+    list: RwLock<FreeList>,
+    pages: AtomicU64,
+}
+
+/// The free list, locked to change; its page count is set as it is let go.
+pub(super) struct Changing<'a> {
+    list: RwLockWriteGuard<'a, FreeList>,
+    pages: &'a AtomicU64,
+}
+
+impl Shared {
+    /// Shares `list`.
+    pub(super) fn new(list: FreeList) -> Shared {
+        let pages = AtomicU64::new(list.pages());
+        Shared { list: RwLock::new(list), pages }
+    }
+
+    /// Pages in the file, with no lock: as the last change let go left it.
+    pub(super) fn pages(&self) -> u64 {
+        self.pages.load(Ordering::Acquire)
+    }
+
+    /// The list, locked shared, to look at.
+    pub(super) fn read(&self) -> RwLockReadGuard<'_, FreeList> {
+        self.list.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The list, locked exclusively, to change.
+    pub(super) fn write(&self) -> Changing<'_> {
+        Changing { list: self.list.write().unwrap_or_else(PoisonError::into_inner), pages: &self.pages }
+    }
+}
+
+impl Deref for Changing<'_> {
+    type Target = FreeList;
+    fn deref(&self) -> &FreeList {
+        &self.list
+    }
+}
+
+impl DerefMut for Changing<'_> {
+    fn deref_mut(&mut self) -> &mut FreeList {
+        &mut self.list
+    }
+}
+
+impl Drop for Changing<'_> {
+    /// Sets the page count while the lock is still held, so it changes in
+    /// the order the list does.
+    fn drop(&mut self) {
+        self.pages.store(self.list.pages(), Ordering::Release);
+    }
+}
 
 /// The free runs, by first page, the pages in the file, and whether either
 /// changed since the list was last recorded.

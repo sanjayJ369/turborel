@@ -9,8 +9,8 @@
 
 use std::sync::atomic::Ordering;
 
+use super::Pager;
 use super::format::{self, KIND_DATA, PAGE_NUMBER_BYTES};
-use super::{Pager, add};
 use crate::disk::encoding::EncodingId;
 use crate::error::{Code, Result, SqlError};
 use crate::hash::read_key_field;
@@ -76,7 +76,7 @@ impl Pager {
             .filter(|(page, _)| self.in_other_formats(page, keyed, &current))
             .map(|(_, id)| id)
             .collect();
-        add(&self.counters.reads, readable.saturating_sub(from));
+        self.counters.count(|s| &s.reads, readable.saturating_sub(from));
         Ok(Behind { again, next })
     }
 

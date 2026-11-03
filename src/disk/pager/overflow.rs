@@ -142,7 +142,7 @@ impl Pager {
         // Found before the header is cut off, as it lists them.
         let spilled = page.len().saturating_sub(start) < length || !listed.is_empty();
         let extents = if spilled {
-            add(&self.counters.overflow_reads, 1);
+            self.counters.count(|s| &s.overflow_reads, 1);
             self.extents_of(page)?.0
         } else {
             Vec::new()
