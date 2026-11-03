@@ -331,17 +331,25 @@ impl RowTable {
     }
 
     /// The record of the version of the row whose newest version is
-    /// `newest` that `reader` sees, if it sees the row.
+    /// `newest` that `reader` sees, if it sees the row: the version's own
+    /// bytes, its header cut off in place, so no copy is made of a record
+    /// the caller already holds.
     pub(super) fn visible_from(&self, newest: Vec<u8>, reader: Reader) -> Result<Option<Vec<u8>>> {
         let mut bytes = newest;
         loop {
-            let older = {
+            let (seen, deleted, header, older) = {
                 let version = Version::parse(&bytes)?;
-                if reader.sees(self.maker(&version)) {
-                    return Ok((!version.deleted).then(|| version.record.to_vec()));
-                }
-                version.older
+                let header = bytes.len().saturating_sub(version.record.len());
+                (reader.sees(self.maker(&version)), version.deleted, header, version.older)
             };
+            if seen {
+                if deleted {
+                    return Ok(None);
+                }
+                // The record is the version's tail (`rows/version.rs`).
+                bytes.drain(..header);
+                return Ok(Some(bytes));
+            }
             let Some(at) = older else { return Ok(None) };
             bytes = self.undo.read(at)?;
         }
