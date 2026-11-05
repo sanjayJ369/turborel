@@ -10,14 +10,30 @@ use super::{Decimal, Value};
 
 /// [X3.135-1986 §5.11 GR5] compare character strings after padding the shorter with spaces.
 /// The collating sequence is implementor-defined [X3.135-1986 §5.11 GR6]: Unicode scalar order.
+///
+/// UTF-8 orders its bytes as Unicode scalar order, and two strings of the
+/// same characters up to a point are of the same bytes up to it: so the
+/// strings are compared as bytes, no character counted. Only when the
+/// shorter in bytes begins the longer do the spaces padding it matter;
+/// then the longer's rest is compared with spaces.
 pub fn compare_strings(left: &str, right: &str) -> Ordering {
-    let length = left.chars().count().max(right.chars().count());
-    padded(left, length).cmp(padded(right, length))
+    match left.len().cmp(&right.len()) {
+        Ordering::Equal => left.cmp(right),
+        // A shorter string that does not begin the longer differs from it
+        // at a byte both have: that byte decides, as the characters there
+        // do, the padding never reached.
+        Ordering::Less => right.strip_prefix(left).map_or_else(|| left.cmp(right), |rest| against_spaces(rest).reverse()),
+        Ordering::Greater => left.strip_prefix(right).map_or_else(|| left.cmp(right), against_spaces),
+    }
 }
 
-/// The characters of `s` followed by spaces, `length` in all.
-fn padded(s: &str, length: usize) -> impl Iterator<Item = char> + '_ {
-    s.chars().chain(std::iter::repeat(' ')).take(length)
+/// [X3.135-1986 §5.11 GR5] How `rest`, the end of the longer of two
+/// strings, compares with the spaces padding the shorter: as its first
+/// character that is not a space compares with a space, equal if none.
+/// A space is one byte, so its first byte that is not a space begins a
+/// character, and decides as that character does.
+fn against_spaces(rest: &str) -> Ordering {
+    rest.bytes().find(|&b| b != b' ').map_or(Ordering::Equal, |b| b.cmp(&b' '))
 }
 
 /// [X3.135-1986 §5.11] compare two values. `None` means the comparison is unknown
@@ -203,6 +219,92 @@ mod tests {
         // The f64 nearest 0.1 is 0.1000000000000000055511151231257827..., not 0.1.
         assert_eq!(compare(&exact(10, 2), &Value::Approx(0.1)), Some(Ordering::Less));
         assert_eq!(compare(&exact(1, 0), &Value::Char("1".into())), None);
+    }
+
+    /// The comparison of [X3.135-1986 §5.11 GR5] as written there: both
+    /// strings padded with spaces to the same number of characters, then
+    /// compared character by character.
+    fn padded_reference(left: &str, right: &str) -> Ordering {
+        let length = left.chars().count().max(right.chars().count());
+        let padded = |s: &str| s.chars().chain(std::iter::repeat(' ')).take(length).collect::<Vec<char>>();
+        padded(left).cmp(&padded(right))
+    }
+
+    /// Verifies: [X3.135-1986 §5.11 GR5] strings equal but for trailing
+    /// spaces compare equal, in both argument orders; so do two empty
+    /// strings, and an empty string and one of spaces alone; an empty
+    /// string against any other compares as spaces do.
+    #[test]
+    fn strings_equal_but_for_trailing_spaces_are_equal() {
+        assert_eq!(compare_strings("ab", "ab   "), Ordering::Equal);
+        assert_eq!(compare_strings("ab   ", "ab"), Ordering::Equal);
+        assert_eq!(compare_strings("ab ", "ab "), Ordering::Equal);
+        assert_eq!(compare_strings("", ""), Ordering::Equal);
+        assert_eq!(compare_strings("", "   "), Ordering::Equal);
+        assert_eq!(compare_strings("  ", ""), Ordering::Equal);
+        assert_eq!(compare_strings("", "a"), Ordering::Less);
+        assert_eq!(compare_strings("a", ""), Ordering::Greater);
+        assert_eq!(compare_strings("", "\t"), Ordering::Greater);
+        assert_eq!(compare_strings("\t", ""), Ordering::Less);
+    }
+
+    /// Verifies: [X3.135-1986 §5.11 GR5] the longer string's characters
+    /// past the shorter's end compare with the spaces padding the shorter:
+    /// a control character, below the space, sorts the longer less; a
+    /// character above it sorts the longer greater; spaces before it do not
+    /// decide; in both argument orders. A shorter string that does not
+    /// begin the longer is decided by their first difference.
+    #[test]
+    fn the_longer_string_compares_with_spaces() {
+        assert_eq!(compare_strings("ab\t", "ab"), Ordering::Less);
+        assert_eq!(compare_strings("ab", "ab\t"), Ordering::Greater);
+        assert_eq!(compare_strings("ab  \u{0}", "ab"), Ordering::Less);
+        assert_eq!(compare_strings("ab", "ab  !"), Ordering::Less);
+        assert_eq!(compare_strings("ab  !", "ab"), Ordering::Greater);
+        assert_eq!(compare_strings("abc", "ab"), Ordering::Greater);
+        assert_eq!(compare_strings("b", "ab\t"), Ordering::Greater);
+        assert_eq!(compare_strings("ab\t", "b"), Ordering::Less);
+        assert_eq!(compare_strings("abc", "abd"), Ordering::Less);
+    }
+
+    /// Verifies: [X3.135-1986 §5.11 GR5] strings of characters of more
+    /// than one byte in UTF-8 compare in Unicode scalar order, the
+    /// collating sequence [X3.135-1986 §5.11 GR6] chosen, as the shorter
+    /// string, the longer, and both: a multibyte character past the
+    /// shorter's end is above the space; a character of fewer bytes but a
+    /// higher scalar, or of more bytes but a lower one, orders by scalar.
+    #[test]
+    fn multibyte_strings_compare_by_scalar() {
+        assert_eq!(compare_strings("é", "é  "), Ordering::Equal);
+        assert_eq!(compare_strings("é  ", "é"), Ordering::Equal);
+        assert_eq!(compare_strings("aé", "a"), Ordering::Greater);
+        assert_eq!(compare_strings("a", "aé"), Ordering::Less);
+        assert_eq!(compare_strings("é", "ab"), Ordering::Greater);
+        assert_eq!(compare_strings("ab", "é"), Ordering::Less);
+        assert_eq!(compare_strings("\u{10000}", "\u{FFFF}"), Ordering::Greater);
+        assert_eq!(compare_strings("\u{FFFF}", "é\u{10000}"), Ordering::Greater);
+        assert_eq!(compare_strings("éa", "éb"), Ordering::Less);
+    }
+
+    /// Verifies: [X3.135-1986 §5.11 GR5] every two strings of up to three
+    /// characters, below, at and above the space, of one to four bytes in
+    /// UTF-8, compare as they do padded with spaces to the same length and
+    /// compared character by character.
+    #[test]
+    fn strings_compare_as_padded_with_spaces() {
+        let alphabet = ['\u{0}', '\u{1F}', ' ', '!', 'a', '\u{7F}', 'é', '\u{FFFF}', '\u{10000}'];
+        let mut strings = vec![String::new()];
+        for _ in 0..3_u8 {
+            let longer: Vec<String> = strings.iter().flat_map(|s| alphabet.iter().map(move |c| format!("{s}{c}"))).collect();
+            strings.extend(longer);
+        }
+        strings.sort();
+        strings.dedup();
+        for a in &strings {
+            for b in &strings {
+                assert_eq!(compare_strings(a, b), padded_reference(a, b), "{a:?} and {b:?}");
+            }
+        }
     }
 
     /// Verifies: [DESIGN] `compare_numerals` orders by sign first, then by

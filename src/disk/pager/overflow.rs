@@ -132,33 +132,37 @@ impl Pager {
         Ok(extents)
     }
 
-    /// Reads the content of a data page's `body` into `content`: what the
-    /// page holds, then its overflow pages, one read per extent.
-    pub(super) fn load(&self, body: &[u8], content: &mut Vec<u8>) -> Result<()> {
+    /// Makes `page`, the body of a data page, its content: what the page
+    /// holds after its header, moved to the front where it lies, then its
+    /// overflow pages, one read per extent, appended.
+    pub(super) fn keep_content(&self, page: &mut Vec<u8>) -> Result<()> {
         let format::DataHeader { length, extents: listed, start, .. } =
-            format::data_header(body).ok_or_else(|| self.damaged("a data page is malformed"))?;
+            format::data_header(page).ok_or_else(|| self.damaged("a data page is malformed"))?;
         let length = usize::try_from(length).map_err(|_| self.damaged("a page's content is longer than memory"))?;
-        let inline = body.get(start..).unwrap_or_default();
-        content.extend_from_slice(inline.get(..length.min(inline.len())).unwrap_or_default());
-        if content.len() == length && listed.is_empty() {
-            return Ok(());
-        }
-        add(&self.counters.overflow_reads, 1);
-        let (extents, _) = self.extents_of(body)?;
+        // Found before the header is cut off, as it lists them.
+        let spilled = page.len().saturating_sub(start) < length || !listed.is_empty();
+        let extents = if spilled {
+            self.counters.count(|s| &s.overflow_reads, 1);
+            self.extents_of(page)?.0
+        } else {
+            Vec::new()
+        };
+        page.drain(..start.min(page.len()));
+        page.truncate(length);
         for e in &extents {
             let pages = self.read_run(e.start.0, e.count)?;
-            for (id, page) in (e.start.0..).zip(pages.chunks(self.page_size)) {
+            for (id, bytes) in (e.start.0..).zip(pages.chunks(self.page_size)) {
                 let overflow = self
-                    .unseal(id, page)?
+                    .unseal(id, bytes)?
                     .filter(|b| b.first() == Some(&KIND_OVERFLOW))
                     .ok_or_else(|| self.damaged("an overflow page is not one"))?;
                 let chunk = overflow.get(OVERFLOW_HEADER..).unwrap_or_default();
-                let wanted = length.saturating_sub(content.len()).min(chunk.len());
-                content.extend_from_slice(chunk.get(..wanted).unwrap_or_default());
+                let wanted = length.saturating_sub(page.len()).min(chunk.len());
+                page.extend_from_slice(chunk.get(..wanted).unwrap_or_default());
             }
         }
-        if content.len() != length {
-            return Err(self.damaged(&format!("a page's content is {} bytes, not the {length} it records", content.len())));
+        if page.len() != length {
+            return Err(self.damaged(&format!("a page's content is {} bytes, not the {length} it records", page.len())));
         }
         Ok(())
     }

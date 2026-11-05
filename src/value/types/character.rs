@@ -30,6 +30,12 @@ fn length_of(t: &DataType) -> u32 {
     if let DataType::Character { length } = t { *length } else { 0 }
 }
 
+/// The number of characters of `s`: its bytes if all are ASCII, one byte
+/// to a character, so the common case counts nothing.
+fn characters(s: &str) -> usize {
+    if s.is_ascii() { s.len() } else { s.chars().count() }
+}
+
 /// The value's string, if it is one.
 pub(super) fn string(v: &Value) -> Option<&str> {
     if let Value::Char(s) = v { Some(s) } else { None }
@@ -220,11 +226,15 @@ impl SqlType for Character {
         Ok(string(v).ok_or_else(|| mismatch(v, t))?.trim_end_matches(' ').as_bytes().to_vec())
     }
 
-    /// Padded again to the length.
+    /// Padded again to the length [X3.135-1986 §8.7 GR7b], built once at
+    /// its size.
     fn decode_record(&self, field: &[u8], t: &DataType) -> Option<Value> {
         let s = std::str::from_utf8(field).ok()?;
-        let pad = usize::try_from(length_of(t)).ok()?.checked_sub(s.chars().count())?;
-        Some(Value::Char(format!("{s}{}", " ".repeat(pad))))
+        let pad = usize::try_from(length_of(t)).ok()?.checked_sub(characters(s))?;
+        let mut padded = String::with_capacity(s.len().saturating_add(pad));
+        padded.push_str(s);
+        padded.extend(std::iter::repeat_n(' ', pad));
+        Some(Value::Char(padded))
     }
 
     /// Padded with spaces to the length [X3.135-1986 §5.11 GR5]: Unicode
@@ -232,7 +242,7 @@ impl SqlType for Character {
     /// bytes.
     fn encode_key(&self, v: &Value, t: &DataType, out: &mut Vec<u8>) -> Result<()> {
         let s = string(v).ok_or_else(|| mismatch(v, t))?;
-        let pad = usize::try_from(length_of(t)).ok().and_then(|n| n.checked_sub(s.chars().count())).ok_or_else(|| mismatch(v, t))?;
+        let pad = usize::try_from(length_of(t)).ok().and_then(|n| n.checked_sub(characters(s))).ok_or_else(|| mismatch(v, t))?;
         out.extend_from_slice(s.as_bytes());
         out.resize(out.len().saturating_add(pad), b' ');
         Ok(())

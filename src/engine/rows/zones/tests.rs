@@ -2,14 +2,15 @@
 
 use std::sync::Arc;
 
-use super::ZONE_ROWS;
 use super::saved::SEGMENT_ZONES;
+use super::{ZONE_ROWS, zone_at};
 use crate::disk::buffer::{BufferPool, Clock};
 use crate::disk::encoding::Pipeline;
 use crate::disk::memory::MemoryFileSystem;
 use crate::disk::pager::Pager;
 use crate::engine::rows::undo::hooked::{Hooked, shared};
-use crate::engine::rows::{RowTable, TableFiles, TableOptions};
+use crate::engine::rows::version::Version;
+use crate::engine::rows::{RowTable, TableFiles, TableOptions, key};
 use crate::error::Code;
 use crate::hash::crc::{CRC32_ISCSI, Crc};
 use crate::index::Probe;
@@ -475,4 +476,41 @@ fn a_zone_summed_up_as_versions_go_leaves_out_rows_gone_and_fails_on_a_loss() {
     // The older version lost, nothing else changed.
     *lock_builtin(&log.on_read) = Some(Box::new(move || lost.truncate_before(lost.end()).unwrap()));
     assert_eq!(table.sum_zones(1).map_err(|e| e.code), Err(Code::Corrupt), "a real loss");
+}
+
+/// Verifies: [DESIGN] RULES.md D31, D34, zone maps settled from their rows'
+/// versions alone: a zone only inserts changed, unsettled and not stale,
+/// is settled visible by one sum up once their commit is at the horizon,
+/// its bounds and row count kept as the inserts made them, and none of
+/// its rows read: a row whose record no longer decodes does not fail it.
+/// A zone an update then leaves stale is summed up whole, its rows read,
+/// so that row fails the sum (SQLCODE -916).
+#[test]
+fn a_zone_only_inserted_into_is_settled_without_reading_its_rows() {
+    let table = Arc::new(RowTable::create(&files(), &TYPES, TableOptions::default()).unwrap());
+    let tx = 10_u64;
+    table.begin(tx, 1).unwrap();
+    let ids: Vec<RowId> = (0..100).map(|n| table.insert(tx, row(n)).unwrap()).collect();
+    table.validate(tx, 2).unwrap();
+    table.commit(tx, 2);
+    let at = zone_at(ids[0]);
+    assert!(ids.iter().all(|&id| zone_at(id) == at), "rows of one zone");
+    let zone_now = || {
+        let map = table.zones.map.read().unwrap();
+        let zone = map.zones[at].lock().unwrap();
+        (format!("{:?} {:?}", zone.bounds, zone.nulls), zone.rows, zone.stale, zone.unsettled)
+    };
+    let (bounds, rows, stale, unsettled) = zone_now();
+    assert_eq!((rows, stale, unsettled), (100, false, true), "counted by the inserts, unsettled, not stale");
+    assert!(!table.zones.visible(ids[0]));
+    // A row's record made unreadable, behind the zones' back.
+    let broken = key(ids[50]);
+    let newest = table.tree.get(&broken).unwrap().unwrap();
+    table.tree.replace(&broken, &Version { record: &[], ..Version::parse(&newest).unwrap() }.encode()).unwrap();
+    assert_eq!(table.sum_zones(2).map_err(|e| e.code), Ok(true), "settled, no row read");
+    assert!(table.zones.visible(ids[0]), "visible");
+    assert_eq!(zone_now(), (bounds, 100, false, false), "bounds and row count kept");
+    assert!(reads(&table, &equal(0, 99), ids[0]) && !reads(&table, &equal(0, 100), ids[0]));
+    table.update(NO_TRANSACTION, ids[0], row(1_000)).unwrap();
+    assert_eq!(table.sum_zones(2).map_err(|e| e.code), Err(Code::Corrupt), "stale: summed up whole, its rows read");
 }

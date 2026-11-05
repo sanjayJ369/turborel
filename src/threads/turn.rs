@@ -8,17 +8,18 @@
 //! taken once every shared hold has left. Split from threads.rs (RULES.md
 //! R-SIZE-2).
 
-use std::sync::{Condvar, Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError};
 use std::thread::{self, ThreadId};
 
 use crate::error::{Code, Result, SqlError};
+use crate::sync::Signal;
 
 /// A turn: the thread holding it, if one does, and the threads holding
 /// it shared, each hold once.
 #[derive(Default)]
 pub(crate) struct Turn {
     holder: Mutex<Holding>,
-    ended: Condvar,
+    ended: Signal,
 }
 
 /// Who holds a turn.

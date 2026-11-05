@@ -154,6 +154,40 @@ fn rows_too_long_move_their_longest_values_out() {
     assert_eq!(failing.err().map(|e| e.code), Some(Code::Io));
 }
 
+/// Verifies: [DESIGN] RULES.md D31, record format: a record is appended
+/// after what `out` already holds, and reads back from where it begins,
+/// in line or with values out of line; a value refused, a row too long
+/// or a store's error leaves `out` as it was.
+#[test]
+fn records_append_to_what_out_holds() {
+    let format = RecordFormat::new(&types());
+    let mut bytes = b"before".to_vec();
+    format.encode(&row(), &mut bytes).unwrap();
+    assert_eq!(bytes.get(..6), Some(&b"before"[..]));
+    assert_eq!(shown(&format.decode(&bytes[6..]).unwrap()), shown(&row()));
+    let long =
+        RecordFormat::new(&[DataType::Exact { precision: 4, scale: 0, spelled: Spelled::Numeric }, DataType::Character { length: 50 }]);
+    let wide = vec![exact(7, 0), Value::Char("y".repeat(50))];
+    let mut store = Vec::new();
+    let mut spilled = b"xy".to_vec();
+    long.encode_spilling(&wide, Spill { threshold: 10, most: 1000 }, &mut spilled, |column, value| {
+        store.push((column, value.to_vec()));
+        Ok(0)
+    })
+    .unwrap();
+    assert_eq!(store.len(), 1);
+    let mut fetch = |_: Reference| Ok(store[0].1.clone());
+    assert_eq!(shown(&long.decode_with(&spilled[2..], &mut fetch).unwrap()), shown(&wide));
+    let mut kept = b"kept".to_vec();
+    let bad = vec![exact(7, 0), Value::Approx(1.0)];
+    assert_eq!(long.encode(&bad, &mut kept).err().map(|e| e.code), Some(Code::Api));
+    let too_long = long.encode_spilling(&wide, Spill { threshold: 1000, most: 20 }, &mut kept, |_, _| Ok(0));
+    assert_eq!(too_long.err().map(|e| e.code), Some(Code::Unsupported));
+    let failing = long.encode_spilling(&wide, Spill { threshold: 10, most: 1000 }, &mut kept, |_, _| Err(SqlError::new(Code::Io, "disk")));
+    assert_eq!(failing.err().map(|e| e.code), Some(Code::Io));
+    assert_eq!(kept, b"kept");
+}
+
 /// Verifies: [DESIGN] RULES.md D31, values out of line: a value is
 /// measured by the bytes its record holds, whatever its type: a VARCHAR
 /// value of trailing spaces, kept with them, and a BIT VARYING value go

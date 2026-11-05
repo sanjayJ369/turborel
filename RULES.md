@@ -1740,7 +1740,10 @@ write-ahead logging.
     committed at or before the horizon, none is a deletion, and no
     version it superseded awaits collection; a commit past the horizon
     leaves it to be looked at again. Collecting its last such version,
-    or taking a deletion out, unsettles it. Kept in memory alone: an
+    or taking a deletion out, unsettles it. A zone known and not stale,
+    changed since by inserts alone, is settled from its rows' newest
+    versions alone, none decoded, its bounds and row count kept as the
+    inserts made them (`bench/maintenance.rs`). Kept in memory alone: an
     opened table's zones are all unsettled, and opening asks for the
     maintenance that settles them.
 - **Zones saved.** Kept in memory, each locked alone, and with the
@@ -2347,7 +2350,9 @@ picks by estimate, so a new method needs no change to the planner.
   probe selects (`Index::estimate`); pages it reads
   (`Index::probe_pages`: a hash table's one bucket, a B-link tree's
   levels); distinct keys (`Index::distinct_keys`, for an equality on all
-  its columns).
+  its columns). An equality on all the columns of a UNIQUE constraint's
+  index selects at most one row, and is priced at one, its index not
+  asked: its estimate searches for the key, as costly as the probe.
 - **Key sketch.** Distinct keys are counted by a sketch kept as the index
   is written, of no more keys than it holds, stored with the index's
   locator: a checkpoint records it with the pages it commits, and

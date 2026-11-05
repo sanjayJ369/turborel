@@ -176,6 +176,14 @@ type Table = [u64; TABLE_LEN];
 /// The register is kept in the orientation that needs no reflecting while
 /// bytes are processed: a reflected CRC in its low `width` bits, least
 /// significant bit first; an unreflected one in its high `width` bits.
+///
+/// Aligned to two cache lines, so that in an `Arc` its fields lie apart
+/// from the reference counts before them: the pager clones and drops its
+/// `Arc<dyn HashFunction>` on every page it reads (`disk/pager/named.rs`),
+/// and threads reading pages at once bounce the counts' cache line between
+/// their cores; with the parameters and the tables' address on that line,
+/// every step of every thread's CRC missed on it (RULES.md D30).
+#[repr(align(128))]
 pub struct Crc {
     params: CrcParams,
     /// Bits below an unreflected register (64 - `width`); 0 when reflected.
@@ -381,6 +389,19 @@ mod tests {
 
     fn crcs() -> Vec<Crc> {
         CATALOGUE.iter().map(|p| Crc::new(*p).unwrap()).collect()
+    }
+
+    /// The alignment that keeps a CRC's fields off the cache line of an
+    /// `Arc`'s two reference counts: two lines of 64 bytes.
+    const APART: usize = 128;
+
+    /// Verifies: [DESIGN] RULES.md D30: a CRC is aligned to two cache
+    /// lines, so that in an `Arc` its parameters and tables lie apart from
+    /// the reference counts that threads reading pages at once write.
+    #[test]
+    fn a_crc_lies_apart_from_the_counts_of_its_sharers() {
+        assert_eq!(align_of::<Crc>(), APART);
+        assert!(size_of::<Crc>() >= APART);
     }
 
     /// 1,280 bytes: 0 to 255, five times.

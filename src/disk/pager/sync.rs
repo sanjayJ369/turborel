@@ -48,7 +48,7 @@ impl Pager {
             // The new record already lists the old trunk pages as free; if
             // they cannot be zeroed they stay in use: lost space, not damage.
             if self.zero_all(&old_trunk).is_ok() {
-                lock_builtin(&self.free).free_recorded(&old_trunk);
+                self.free.write().free_recorded(&old_trunk);
             }
         }
         add(&self.counters.syncs, 1);
@@ -65,7 +65,7 @@ impl Pager {
     fn record(&self, sequence: u64, old_trunk: &[Extent], durability: Durability) -> Result<Option<(Meta, Vec<Extent>)>> {
         let per_trunk = self.body_size().saturating_sub(format::LIST_HEADER).checked_div(format::ENTRY).unwrap_or(1).max(1);
         let (trailing, pages, trunk, runs) = {
-            let mut free = lock_builtin(&self.free);
+            let mut free = self.free.write();
             // Written again too once the header is settled (`formats.rs`),
             // so the slot names the key the header does.
             if !free.changed() && !self.resettled.swap(false, Ordering::AcqRel) {
@@ -100,7 +100,7 @@ impl Pager {
             Err(e) => {
                 // Nothing refers to the new trunk pages; as in `write`.
                 let _ = self.release(&trunk);
-                let mut free = lock_builtin(&self.free);
+                let mut free = self.free.write();
                 if let Some(run) = trailing {
                     // Taken from this list, so returning it cannot overlap.
                     let _ = free.free(&[run]);
@@ -141,7 +141,7 @@ impl Pager {
     /// no lock is held during the cut.
     fn cut(&self, run: Extent) -> Result<()> {
         let cut = self.offset(run.start.0).and_then(|at| self.file.set_size(at));
-        let mut free = lock_builtin(&self.free);
+        let mut free = self.free.write();
         if cut.is_ok() {
             self.on_file.fetch_min(run.start.0, Ordering::AcqRel);
             free.release_trailing(run);

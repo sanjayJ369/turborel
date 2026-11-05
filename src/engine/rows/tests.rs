@@ -3,8 +3,9 @@
 //! older version kept for open readers, deleted rows not written, the
 //! versions and the garbage read as of a time, a dropped table's pages
 //! freed, a fetch priced by what its table reads and by the system's
-//! cache, the pages its pool reads ahead as the settings say, and writes
-//! that keep what every snapshot reads failing no reader (RULES.md
+//! cache, the pages its pool reads ahead as the settings say, writes
+//! that keep what every snapshot reads failing no reader, and a commit's
+//! stamp leaving a row another transaction wrote since (RULES.md
 //! R-TEST-1, R-TEST-2, R-TEST-7). Split from rows.rs
 //! (RULES.md R-SIZE-2).
 
@@ -12,6 +13,7 @@ use turborel_test_support::Scratch;
 
 use super::meta::{Meta, parse_meta};
 use super::mvcc::Reader;
+use super::version::{Maker, Version};
 use super::*;
 use crate::disk::buffer::Clock;
 use crate::disk::encoding::Pipeline;
@@ -416,4 +418,40 @@ fn pages_in_memory_are_read_ahead_by_their_reader() {
         assert_eq!(pool.ahead_pages(&mut ahead, file, &past), 16_usize, "a window, of 128 frames");
         assert_eq!(pool.ahead_pages(&mut ahead, file, &past[16..]), 0_usize, "queued, so no room: {made_first}");
     }
+}
+
+/// Verifies: [DESIGN] RULES.md D29, commit: stamping a row's newest
+/// version, as a transaction's commit does, stamps it only if the
+/// transaction made it: a row another transaction wrote since, its
+/// version open, is left as it is, byte for byte, and a row of no entry
+/// stays absent; the writer's own commit then stamps its version, and a
+/// deletion's stamp says it is one.
+#[test]
+fn a_stamp_leaves_a_row_another_transaction_wrote_since() {
+    use crate::value::{Decimal, Spelled, Value};
+    let files = small_pool();
+    let table = RowTable::create(&files, &[DataType::Exact { precision: 9, scale: 0, spelled: Spelled::Integer }], TableOptions::default())
+        .unwrap();
+    let number = |n: i128| vec![Value::Exact(Decimal::new(n, 0))];
+    let (first, second) = (10_u64, 11_u64);
+    table.begin(first, 1).unwrap();
+    let id = table.insert(first, number(1)).unwrap();
+    table.validate(first, 2).unwrap();
+    table.commit(first, 2);
+    table.begin(second, 2).unwrap();
+    table.update(second, id, number(2)).unwrap();
+    let written = table.tree.get(&key(id)).unwrap();
+    assert!(!table.stamp(first, id, 3).unwrap());
+    assert_eq!(table.tree.get(&key(id)).unwrap(), written, "the other transaction's version left as it is");
+    let absent = id.checked_add(1).unwrap();
+    assert!(!table.stamp(first, absent, 3).unwrap());
+    assert_eq!(table.tree.get(&key(absent)).unwrap(), None, "no entry made");
+    assert!(!table.stamp(second, id, 3).unwrap(), "its own, not a deletion");
+    let stamped = table.tree.get(&key(id)).unwrap().unwrap();
+    let version = Version::parse(&stamped).unwrap();
+    assert_eq!((version.maker, stamped.len()), (Maker::Committed(3), written.unwrap().len()), "stamped, in its length");
+    let third = 12_u64;
+    table.begin(third, 4).unwrap();
+    table.delete(third, id).unwrap();
+    assert!(table.stamp(third, id, 5).unwrap(), "a deletion");
 }

@@ -8,7 +8,7 @@
 use std::sync::atomic::Ordering;
 
 use super::format::{self, NONE};
-use super::{PageId, Pager, add};
+use super::{PageId, Pager};
 use crate::error::Result;
 
 impl Pager {
@@ -41,10 +41,10 @@ impl Pager {
         if !header.extents.is_empty() || header.directory != NONE {
             return None;
         }
-        let mut stored = Vec::new();
-        self.load(body, &mut stored).ok()?;
+        let mut stored = body.to_vec();
+        self.keep_content(&mut stored).ok()?;
         self.known.set(id.0, &[]);
-        add(&self.counters.reads, 1);
+        self.counters.count(|s| &s.reads, 1);
         if self.pipeline.plain(&header.ids) {
             return Some(stored);
         }

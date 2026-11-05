@@ -9,10 +9,77 @@
 //! that holds the request; failing that, if the free pages hold it, free
 //! runs largest first; failing that, every free run, the one at the end of
 //! the file (if there is one) last and grown, so the new pages continue it.
+//!
+//! The pager keeps it behind a lock that reads of pages take shared, to
+//! check the page read is not free, and its page count beside it, set by
+//! every change as the lock is let go, so a read checks its page is in the
+//! file with no lock (`Shared`).
 
 use std::collections::BTreeMap;
+use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::{Extent, PageId};
+
+/// \[DESIGN\] The pager's free list, shared between its threads: reads of
+/// pages look at it together, and only allocating and freeing change it.
+/// Its page count is kept in an atomic too, read with no lock. No plug-in
+/// is called while it is locked, so a poisoned lock is used as it is.
+pub(super) struct Shared {
+    list: RwLock<FreeList>,
+    pages: AtomicU64,
+}
+
+/// The free list, locked to change; its page count is set as it is let go.
+pub(super) struct Changing<'a> {
+    list: RwLockWriteGuard<'a, FreeList>,
+    pages: &'a AtomicU64,
+}
+
+impl Shared {
+    /// Shares `list`.
+    pub(super) fn new(list: FreeList) -> Shared {
+        let pages = AtomicU64::new(list.pages());
+        Shared { list: RwLock::new(list), pages }
+    }
+
+    /// Pages in the file, with no lock: as the last change let go left it.
+    pub(super) fn pages(&self) -> u64 {
+        self.pages.load(Ordering::Acquire)
+    }
+
+    /// The list, locked shared, to look at.
+    pub(super) fn read(&self) -> RwLockReadGuard<'_, FreeList> {
+        self.list.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The list, locked exclusively, to change.
+    pub(super) fn write(&self) -> Changing<'_> {
+        Changing { list: self.list.write().unwrap_or_else(PoisonError::into_inner), pages: &self.pages }
+    }
+}
+
+impl Deref for Changing<'_> {
+    type Target = FreeList;
+    fn deref(&self) -> &FreeList {
+        &self.list
+    }
+}
+
+impl DerefMut for Changing<'_> {
+    fn deref_mut(&mut self) -> &mut FreeList {
+        &mut self.list
+    }
+}
+
+impl Drop for Changing<'_> {
+    /// Sets the page count while the lock is still held, so it changes in
+    /// the order the list does.
+    fn drop(&mut self) {
+        self.pages.store(self.list.pages(), Ordering::Release);
+    }
+}
 
 /// The free runs, by first page, the pages in the file, and whether either
 /// changed since the list was last recorded.
@@ -126,27 +193,57 @@ impl FreeList {
     /// Why, if an extent is empty, reaches past the file, or overlaps a
     /// page already free; nothing is freed then.
     pub(super) fn free(&mut self, extents: &[Extent]) -> Result<(), String> {
-        let mut after = self.clone();
+        self.check_free(extents)?;
         for e in extents {
-            after.free_one(*e)?;
+            // Checked, so none fails: freeing them in turn finds what
+            // checking did.
+            self.free_one(*e)?;
         }
-        after.changed = after.changed || !extents.is_empty();
-        *self = after;
+        self.changed = self.changed || !extents.is_empty();
         Ok(())
+    }
+
+    /// Checks that `extents` can be freed, with nothing changed or copied:
+    /// each within the file, overlapping no free page and none of the
+    /// extents before it. Each is checked against the free runs and against
+    /// those before it apart, as freeing them in turn would find them in one
+    /// list.
+    ///
+    /// # Errors
+    ///
+    /// As `free`'s, of the first extent freeing them in turn would refuse.
+    pub(super) fn check_free(&self, extents: &[Extent]) -> Result<(), String> {
+        // Only those before the last are looked up again.
+        let mut before = BTreeMap::new();
+        for (n, e) in extents.iter().enumerate() {
+            let end = self.end_within(*e)?;
+            let start = e.start.0;
+            if overlaps(&self.runs, start, end) || overlaps(&before, start, end) {
+                return Err(includes_free(start, end));
+            }
+            if n.saturating_add(1) < extents.len() {
+                before.insert(start, e.count);
+            }
+        }
+        Ok(())
+    }
+
+    /// The page after `e`, if it is not empty and lies within the file.
+    fn end_within(&self, e: Extent) -> Result<u64, String> {
+        let (start, count) = (e.start.0, e.count);
+        start
+            .checked_add(count)
+            .filter(|&end| count > 0 && end <= self.pages)
+            .ok_or_else(|| format!("{count} pages from page {start} are not within the {} pages of the file", self.pages))
     }
 
     fn free_one(&mut self, e: Extent) -> Result<(), String> {
         let (start, count) = (e.start.0, e.count);
-        let end = start.checked_add(count).filter(|&end| count > 0 && end <= self.pages);
-        let Some(end) = end else {
-            return Err(format!("{count} pages from page {start} are not within the {} pages of the file", self.pages));
-        };
-        let before = self.runs.range(..start).next_back().map(|(&s, &c)| (s, s.saturating_add(c)));
-        let overlaps_before = before.is_some_and(|(_, before_end)| before_end > start);
-        let overlaps_after = self.runs.range(start..end).next().is_some();
-        if overlaps_before || overlaps_after {
-            return Err(format!("pages from {start} to {} include a free page", end.saturating_sub(1)));
+        let end = self.end_within(e)?;
+        if overlaps(&self.runs, start, end) {
+            return Err(includes_free(start, end));
         }
+        let before = self.runs.range(..start).next_back().map(|(&s, &c)| (s, s.saturating_add(c)));
         let mut run = (start, count);
         if let Some((before_start, before_end)) = before.filter(|&(_, before_end)| before_end == start) {
             self.runs.remove(&before_start);
@@ -191,6 +288,20 @@ impl FreeList {
         }
         Ok(())
     }
+}
+
+/// Whether pages `start` to `end`, less one, include one of `runs`, runs
+/// by first page that do not overlap one another.
+fn overlaps(runs: &BTreeMap<u64, u64>, start: u64, end: u64) -> bool {
+    let overlaps_before = runs.range(..start).next_back().is_some_and(|(&s, &c)| s.saturating_add(c) > start);
+    let overlaps_after = runs.range(start..end).next().is_some();
+    overlaps_before || overlaps_after
+}
+
+/// Why pages `start` to `end`, less one, cannot be freed: they include a
+/// free page.
+fn includes_free(start: u64, end: u64) -> String {
+    format!("pages from {start} to {} include a free page", end.saturating_sub(1))
 }
 
 // Unit tests: allocation and freeing, which do no I/O (RULES.md R-TEST-1).
@@ -275,5 +386,33 @@ mod tests {
         assert_eq!((f.pages(), f.runs()), (7, vec![extent(4, 3)]));
         f.grow_free(5).unwrap();
         assert_eq!(f.pages(), 7, "never shrinks");
+    }
+
+    /// Verifies: [DESIGN] RULES.md D30, free list: extents of one call
+    /// that overlap one another, either first, are refused as a double free
+    /// is, with the same reason, and nothing is freed; ones that touch are
+    /// freed and merged; checking alone frees nothing. MC/DC of the overlap
+    /// decision (`runs || before`): (free run, none before) refused; (no
+    /// free run, one before) refused; (neither) freed.
+    #[test]
+    fn extents_overlapping_within_one_call_are_refused() {
+        let mut f = FreeList::new(20);
+        f.free(&[extent(10, 2)]).unwrap();
+        for (bad, why) in [
+            (vec![extent(0, 3), extent(2, 2)], "pages from 2 to 3 include a free page"),
+            (vec![extent(2, 2), extent(0, 3)], "pages from 0 to 2 include a free page"),
+            (vec![extent(0, 1), extent(5, 1), extent(5, 1)], "pages from 5 to 5 include a free page"),
+            (vec![extent(0, 1), extent(11, 3)], "pages from 11 to 13 include a free page"),
+            (vec![extent(0, 1), extent(19, 2)], "2 pages from page 19 are not within the 20 pages of the file"),
+        ] {
+            assert_eq!(f.check_free(&bad), Err(why.to_owned()), "{bad:?}");
+            assert_eq!(f.free(&bad), Err(why.to_owned()), "{bad:?}");
+            assert_eq!(f.runs(), vec![extent(10, 2)], "{bad:?}: nothing freed");
+        }
+        f.check_free(&[extent(0, 2), extent(2, 2)]).unwrap();
+        assert_eq!(f.runs(), vec![extent(10, 2)], "checking frees nothing");
+        f.free(&[extent(2, 2), extent(0, 2), extent(12, 1)]).unwrap();
+        assert_eq!(f.runs(), vec![extent(0, 4), extent(10, 3)]);
+        assert!(f.free(&[]).is_ok());
     }
 }

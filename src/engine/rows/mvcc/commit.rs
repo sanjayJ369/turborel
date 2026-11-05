@@ -4,6 +4,7 @@
 //! a segment of its changes at a time. Split from engine/rows/mvcc.rs
 //! (RULES.md R-SIZE-2); see its documentation.
 
+use std::cell::Cell;
 use std::mem;
 use std::sync::atomic::Ordering;
 
@@ -11,6 +12,7 @@ use super::lists::decode_change;
 use super::reads::Changed;
 use super::{Dead, Maker, Validated, Version};
 use crate::engine::rows::{RowTable, key};
+use crate::engine::tree::Update;
 use crate::error::{Code, Result, SqlError};
 use crate::hash::murmur::MurmurSet;
 use crate::storage::{Row, RowId};
@@ -137,15 +139,24 @@ impl RowTable {
     }
 
     /// Stamps the newest version of row `id`, made by `tx`, committed at
-    /// `at`; whether it is a deletion.
-    pub(super) fn stamp(&self, tx: TxId, id: RowId, at: Timestamp) -> Result<bool> {
-        let k = key(id);
-        let Some(newest) = self.tree.get(&k)? else { return Ok(false) };
-        let version = Version::parse(&newest)?;
-        if version.maker != Maker::Open(tx) {
-            return Ok(false);
-        }
-        self.tree.replace(&k, &Version { maker: Maker::Committed(at), ..version }.encode())?;
-        Ok(version.deleted)
+    /// `at`; whether it is a deletion. A newest version of another
+    /// transaction's, or none, is left as it is.
+    ///
+    /// In one descent (`BLinkTree::update`): the entry is read and stamped
+    /// under its leaf's lock, so no writer changes it in between, and the
+    /// stamp, of the version's own length (a committed version's header is
+    /// an open one's size), is written over it in place.
+    pub(in crate::engine::rows) fn stamp(&self, tx: TxId, id: RowId, at: Timestamp) -> Result<bool> {
+        let deleted = Cell::new(false);
+        self.tree.update(&key(id), |newest| {
+            let Some(newest) = newest else { return Ok(Update::Keep) };
+            let version = Version::parse(newest)?;
+            if version.maker != Maker::Open(tx) {
+                return Ok(Update::Keep);
+            }
+            deleted.set(version.deleted);
+            Ok(Update::Put(Version { maker: Maker::Committed(at), ..version }.encode()))
+        })?;
+        Ok(deleted.get())
     }
 }

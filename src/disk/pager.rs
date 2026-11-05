@@ -20,6 +20,7 @@
 //! wrong place. The format is in `format.rs`.
 
 mod ahead;
+mod counters;
 mod format;
 mod formats;
 mod free;
@@ -32,8 +33,10 @@ mod sync;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 
+pub use counters::PagerCounts;
+use counters::{Counters, add};
 pub use format::FORMAT_VERSION;
 use format::{KIND_DATA, KIND_NEW, KIND_TRUNK, META_AT, Meta, NONE};
 pub use formats::{Behind, Formats};
@@ -45,7 +48,7 @@ use super::encoding::{Encoding, LivePipeline, Pipeline};
 use super::io::{DiskFile, Durability, FileSystem, OpenMode, begin_file};
 use crate::error::{Code, Result, SqlError};
 use crate::hash::{HashFunction, HashId};
-use crate::sync::lock_builtin;
+use crate::sync::{Signal, lock_builtin};
 
 /// \[DESIGN\] The smallest page size: a modern disk sector, and room in the
 /// header page for the two meta slots in sectors of their own.
@@ -84,48 +87,6 @@ pub struct PagerRecovery {
     pub cut: u64,
 }
 
-/// The counters of a pager, for the heuristics above it (RULES.md D30).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PagerCounts {
-    /// Pages read with `read`.
-    pub reads: u64,
-    /// Of those, never written: new, with no content.
-    pub new_reads: u64,
-    /// Of those, whose content overflowed.
-    pub overflow_reads: u64,
-    /// Pages written with `write`.
-    pub writes: u64,
-    /// Overflow and directory pages written for them.
-    pub overflow_pages_written: u64,
-    /// Content bytes written with `write`.
-    pub content_bytes: u64,
-    /// Bytes they took once encoded: with compression, fewer.
-    pub stored_bytes: u64,
-    /// Syncs.
-    pub syncs: u64,
-    /// Pages read that failed their checksum or held another page's number.
-    pub corrupt_reads: u64,
-}
-
-/// `PagerCounts`, counted lock-free.
-#[derive(Debug, Default)]
-struct Counters {
-    reads: AtomicU64,
-    new_reads: AtomicU64,
-    overflow_reads: AtomicU64,
-    writes: AtomicU64,
-    overflow_pages_written: AtomicU64,
-    content_bytes: AtomicU64,
-    stored_bytes: AtomicU64,
-    syncs: AtomicU64,
-    corrupt_reads: AtomicU64,
-}
-
-/// Adds `n` to `counter`; it would wrap only after 2^64, which no file reaches.
-fn add(counter: &AtomicU64, n: u64) {
-    counter.fetch_add(n, Ordering::Relaxed);
-}
-
 /// What `sync` keeps between runs.
 struct SyncState {
     /// Whether a sync is running; syncs take turns.
@@ -154,12 +115,13 @@ pub struct Pager {
     /// written, so the next sync writes the slot again, keyed anew.
     resettled: AtomicBool,
     page_size: usize,
-    free: Mutex<FreeList>,
+    /// The free list, its page count read with no lock (`free.rs`).
+    free: free::Shared,
     /// Pages written to the file: past them a page reads as new.
     on_file: AtomicU64,
     sync_state: Mutex<SyncState>,
     /// Signalled when a sync ends.
-    synced: Condvar,
+    synced: Signal,
     counters: Counters,
     /// The overflow of the pages it read or wrote (`known.rs`).
     known: known::Known,
@@ -267,7 +229,7 @@ impl Pager {
         pager.hash = keyed;
         pager.settled = Mutex::new(Formats { encodings: ids, key });
         pager.pipeline = Encoded::Named(Named::new(pipeline, encodings, path));
-        *lock_builtin(&pager.free) = FreeList::new(meta.pages);
+        *pager.free.write() = FreeList::new(meta.pages);
         lock_builtin(&pager.sync_state).sequence = meta.sequence;
         pager.on_file.store(on_file, Ordering::Release);
         pager.load_free_list(meta, on_file)?;
@@ -285,10 +247,10 @@ impl Pager {
             settled: Mutex::new(Formats::default()),
             resettled: AtomicBool::new(false),
             page_size,
-            free: Mutex::new(FreeList::new(0)),
+            free: free::Shared::new(FreeList::new(0)),
             on_file: AtomicU64::new(0),
             sync_state: Mutex::new(SyncState { running: false, sequence: 0, trunk: Vec::new() }),
-            synced: Condvar::new(),
+            synced: Signal::new(),
             counters: Counters::default(),
             known: known::Known::new(),
         }
@@ -311,7 +273,7 @@ impl Pager {
             runs.extend(entries);
             next = after;
         }
-        let mut free = lock_builtin(&self.free);
+        let mut free = self.free.write();
         free.free(&runs).map_err(|why| self.damaged(&format!("its free list is wrong: {why}")))?;
         free.grow_free(on_file).map_err(|why| self.damaged(&format!("its free list is wrong: {why}")))?;
         drop(free);
@@ -338,12 +300,12 @@ impl Pager {
 
     /// Pages in the file, free ones included.
     pub fn page_count(&self) -> u64 {
-        lock_builtin(&self.free).pages()
+        self.free.pages()
     }
 
     /// Free pages.
     pub fn free_pages(&self) -> u64 {
-        lock_builtin(&self.free).free_pages()
+        self.free.read().free_pages()
     }
 
     /// The id of the hash function that checksums the pages.
@@ -373,23 +335,6 @@ impl Pager {
     pub fn set_hash(&self, hash: Arc<dyn HashFunction>) -> Result<()> {
         self.hash.set(hash)
     }
-
-    /// The counters now.
-    pub fn counts(&self) -> PagerCounts {
-        let get = |c: &AtomicU64| c.load(Ordering::Relaxed);
-        let c = &self.counters;
-        PagerCounts {
-            reads: get(&c.reads),
-            new_reads: get(&c.new_reads),
-            overflow_reads: get(&c.overflow_reads),
-            writes: get(&c.writes),
-            overflow_pages_written: get(&c.overflow_pages_written),
-            content_bytes: get(&c.content_bytes),
-            stored_bytes: get(&c.stored_bytes),
-            syncs: get(&c.syncs),
-            corrupt_reads: get(&c.corrupt_reads),
-        }
-    }
 }
 
 impl Pager {
@@ -397,7 +342,7 @@ impl Pager {
     /// are, consecutive where it can, new ones at the end otherwise. They
     /// read as new, with no content, until written.
     pub fn allocate(&self, count: u64) -> Vec<Extent> {
-        lock_builtin(&self.free).allocate(count)
+        self.free.write().allocate(count)
     }
 
     /// Frees the pages of `extents`, and any overflow pages of their
@@ -410,7 +355,7 @@ impl Pager {
     /// one of the pager's own (overflow, directory or free-list pages);
     /// nothing is freed then. SQLCODE -915 if a freed page cannot be zeroed.
     pub fn free(&self, extents: &[Extent]) -> Result<()> {
-        lock_builtin(&self.free).clone().free(extents).map_err(|why| SqlError::new(Code::Api, format!("[DESIGN] cannot free: {why}")))?;
+        self.free.read().check_free(extents).map_err(|why| SqlError::new(Code::Api, format!("[DESIGN] cannot free: {why}")))?;
         let mut all = extents.to_vec();
         for e in extents {
             for id in e.start.0..e.start.0.saturating_add(e.count) {
@@ -437,7 +382,7 @@ impl Pager {
     /// other pages, can be followed, and freed content does not linger.
     fn release(&self, extents: &[Extent]) -> Result<()> {
         self.zero_all(extents)?;
-        lock_builtin(&self.free).free(extents).map_err(|why| SqlError::new(Code::Api, format!("[DESIGN] cannot free: {why}")))
+        self.free.write().free(extents).map_err(|why| SqlError::new(Code::Api, format!("[DESIGN] cannot free: {why}")))
     }
 
     /// Zeroes the pages of `extents`.
@@ -462,13 +407,14 @@ impl Pager {
         Ok(())
     }
 
-    /// Checks that page `id` is in use, as `read` and `write` need.
+    /// Checks that page `id` is in use, as `read` and `write` need: with no
+    /// lock taken but the free list's shared one, so reads run together.
     fn check_in_use(&self, id: PageId) -> Result<()> {
-        let free = lock_builtin(&self.free);
-        if id.0 >= free.pages() || free.is_free(id.0) {
+        let pages = self.free.pages();
+        if id.0 >= pages || self.free.read().is_free(id.0) {
             return Err(SqlError::new(
                 Code::Api,
-                format!("[DESIGN] page {} of {} is not allocated: its file has {} pages", id.0, self.path.display(), free.pages()),
+                format!("[DESIGN] page {} of {} is not allocated: its file has {pages} pages", id.0, self.path.display()),
             ));
         }
         Ok(())
@@ -476,37 +422,37 @@ impl Pager {
 
     /// Reads the content of page `id` into `content`, replacing what it
     /// held: from the page, and from its overflow pages if it has any,
-    /// decoded by the file's pipeline. A
-    /// page never written has no content.
+    /// decoded by the file's pipeline. A page never written has no content.
+    /// The page is read into `content` itself, verified and its header cut
+    /// off there, so a read of plain content into a buffer of a page's size
+    /// allocates nothing.
     ///
     /// # Errors
     ///
     /// SQLCODE -910 if the page is not allocated, or is one of the pager's
     /// own; SQLCODE -916 if a page fails its checksum, holds another page's
     /// number, or is malformed; SQLCODE -915 if the file cannot be read.
+    /// What `content` holds then is of no use.
     pub fn read(&self, id: PageId, content: &mut Vec<u8>) -> Result<()> {
         self.check_in_use(id)?;
-        add(&self.counters.reads, 1);
-        content.clear();
-        let Some(body) = self.read_body(id.0)? else {
-            add(&self.counters.new_reads, 1);
+        self.counters.count(|s| &s.reads, 1);
+        if !self.body_into(id.0, content)? {
+            self.counters.count(|s| &s.new_reads, 1);
             self.known.set(id.0, &[]);
             return Ok(());
-        };
-        self.check_data(id, &body)?;
-        let header = format::data_header(&body).ok_or_else(|| self.damaged("a data page is malformed"))?;
+        }
+        self.check_data(id, content)?;
+        let header = format::data_header(content).ok_or_else(|| self.damaged("a data page is malformed"))?;
         // Known without reading anything else: no overflow, or only what it
         // lists itself.
         if header.directory == NONE {
             self.known.set(id.0, &header.extents);
         }
+        self.keep_content(content)?;
         if self.pipeline.plain(&header.ids) {
-            return self.load(&body, content);
+            return Ok(());
         }
-        let mut stored = Vec::new();
-        self.load(&body, &mut stored)?;
-        content.extend_from_slice(&self.pipeline.decode(id.0, &header.ids, &stored)?);
-        Ok(())
+        self.pipeline.decode_in_place(id.0, &header.ids, content)
     }
 
     /// Writes `content`, of any length, as the content of page `id`, in
@@ -546,9 +492,9 @@ impl Pager {
             return Err(e);
         }
         self.known.set(id.0, &allocated);
-        add(&self.counters.writes, 1);
-        add(&self.counters.content_bytes, u64::try_from(content.len()).unwrap_or(u64::MAX));
-        add(&self.counters.stored_bytes, u64::try_from(stored.len()).unwrap_or(u64::MAX));
+        self.counters.count(|s| &s.writes, 1);
+        self.counters.count(|s| &s.content_bytes, u64::try_from(content.len()).unwrap_or(u64::MAX));
+        self.counters.count(|s| &s.stored_bytes, u64::try_from(stored.len()).unwrap_or(u64::MAX));
         // Nothing refers to the old overflow pages any longer.
         self.release(&old)
     }
