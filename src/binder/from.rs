@@ -275,6 +275,7 @@ pub(super) fn bind_reference(b: Bounds<'_>, r: &TableReference, start: usize, fr
         TableReference::Unnest(u) => unnest_item(b, u, start, from).or_at(u.at)?,
         TableReference::Recognized(r) => super::pattern::recognized(b, r, start).or_at(r.at)?,
         TableReference::Polymorphic(p) => return super::ptf::ptf_reference(b, p, start, from),
+        TableReference::JsonTable(j) => super::json::json_table_item(b, j, start, from).or_at(j.at)?,
     };
     from.items.push(item);
     Ok(Tree::Item(from.items.len().saturating_sub(1)))
@@ -432,8 +433,7 @@ fn bind_join(b: Bounds<'_>, j: &JoinedTable, start: usize, from: &mut From) -> R
     from.lateral.truncate(seen);
     let right = right?;
     if matches!(j.kind, JoinKind::Right | JoinKind::Full | JoinKind::Union) {
-        let refused =
-            "[ISO/IEC 9075-2:2023 §7.10 SR4] the second operand of a RIGHT or FULL join references its first in a collection derived table";
+        let refused = "[ISO/IEC 9075-2:2023 §7.10 SR4] the second operand of a RIGHT or FULL join references its first in a collection derived table or a <JSON table>";
         not_lateral(&right, &from.items, start..start.saturating_add(lw), refused)?;
     }
     let rw = width(&right, &from.items);

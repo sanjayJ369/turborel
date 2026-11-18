@@ -501,8 +501,8 @@ table expression [§7.3]; X3.135-1986 §5.25 and §8.3. WITH and WITH
 RECURSIVE are the `<with clause>` of ISO/IEC 9075-2:2023 §7.17, Features
 T121, T122, T131 and T132, and SEARCH and CYCLE its `<search or cycle
 clause>` [§7.18], with Feature T133. The fields of a row, `R.*`, are its `<all
-fields reference>` [§7.16], and UNNEST its `<collection derived table>`
-[§7.6]. TABLE ( a polymorphic table function's invocation ) is the `<PTF
+fields reference>` [§7.16], UNNEST its `<collection derived table>`
+[§7.6], and JSON_TABLE its `<JSON table>` [§7.11]. TABLE ( a polymorphic table function's invocation ) is the `<PTF
 derived table>` of §7.6, Features B200 to B209. PARTITION BY on an operand of a join is its `<partitioned join
 table>` [§7.10], Feature F403. ROLLUP, CUBE, GROUPING SETS and the empty
 grouping set are the `<group by clause>` of §7.13 and GROUPING its

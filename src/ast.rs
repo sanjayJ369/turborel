@@ -37,6 +37,7 @@ mod expression;
 mod generated;
 mod joined;
 mod json;
+mod json_table;
 mod merge;
 mod modules;
 mod ordered;
@@ -81,6 +82,10 @@ pub use joined::{JoinKind, JoinSpecification, JoinedTable, Partitioning};
 pub use json::{
     IsJson, JsonAggregate, JsonArgument, JsonClauses, JsonCommon, JsonConstructor, JsonExpression, JsonFormat, JsonInput, JsonMember,
     JsonOperator, JsonOutput, JsonValueBehavior,
+};
+pub use json_table::{
+    JsonFormattedColumn, JsonNestedColumns, JsonPathName, JsonPathText, JsonPlanClause, JsonRegularColumn, JsonTable, JsonTableColumn,
+    JsonTablePlan,
 };
 pub use merge::{MatchedAction, MergeInsert, MergeStatement, MergeWhen};
 pub use modules::ModuleDefinition;

@@ -14,8 +14,9 @@ use crate::error::Result;
 use crate::lexer::{Tok, delim, kw};
 
 /// The `<non-reserved word>` of an `<SQL-server module path
-/// specification>`.
-const PATH: &str = "PATH";
+/// specification>`, and of a path of JSON_TABLE [ISO/IEC 9075-2:2023
+/// §7.11].
+pub(super) const PATH: &str = "PATH";
 
 /// The schemas of a module's PATH, if written, each its catalog, if
 /// written, and name; and the PATH as written.

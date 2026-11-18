@@ -140,6 +140,7 @@ mod joined_tables;
 mod joins;
 mod json_constructors;
 mod json_functions;
+mod json_table;
 mod kept_plans;
 mod language;
 mod language_collations;

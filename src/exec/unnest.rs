@@ -8,7 +8,10 @@
 //!
 //! The rows of one input row are made together, at most
 //! `MAX_ARRAY_CARDINALITY` of them, and each is taken only while the
-//! statement is not cancelled (RULES.md D44).
+//! statement is not cancelled (RULES.md D44). A `<JSON table>` is run
+//! over its input as one is (`exec/unnest/json_table.rs`).
+
+mod json_table;
 
 use std::sync::Arc;
 
@@ -27,6 +30,9 @@ pub(super) fn unnested(plan: Plan, db: &Arc<State>, tx: TxId) -> RowIter {
     let Plan::Unnest(u) = plan else { return failed(broken("a collection derived table is not one")) };
     let (u, input) = u.split();
     let (rows, runner) = (execute(input, db, tx), Runner::new(db, tx));
+    if let Some(table) = u.json.clone() {
+        return Box::new(checked(json_table::joined(u, table, rows, runner), db.tx.stop_of(tx)));
+    }
     let made = rows.flat_map(move |read| {
         let found = read.and_then(|row| of_row(&u, row, &runner));
         let (made_rows, error) = match found {

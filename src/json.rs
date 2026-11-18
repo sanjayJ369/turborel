@@ -30,6 +30,10 @@
 //! `json_object`, `json_array`, `json_array_by_query` and the accumulators
 //! `JsonObjectAgg` and `JsonArrayAgg` (`json/construct.rs`), of their
 //! inputs already evaluated, returning JSON text.
+//!
+//! JSON_TABLE [§7.11] is a `Table`, whose rows `Table::rows` makes of its
+//! operands' values by the rules the query operators apply
+//! (`json/table.rs`).
 
 mod construct;
 mod item;
@@ -37,6 +41,7 @@ mod path;
 mod predicate;
 mod query;
 mod serialize;
+mod table;
 mod text;
 
 pub use construct::{
@@ -51,6 +56,7 @@ pub use query::{
     cast_sequence, is_exception, json_exists, json_query, json_value, process, sequence_to_item, serialize_sequence,
 };
 pub use serialize::{serialize, serialize_as};
+pub use table::{Column, ColumnKind, Join, Operands, Plan, Primitive, Rows, Siblings, Slot, Table, TableBehavior};
 pub use text::{Keys, parse};
 
 use crate::error::{Code, SqlError};

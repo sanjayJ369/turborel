@@ -107,7 +107,10 @@ fn plan_can_raise(plan: &LogicalPlan) -> bool {
         LogicalPlan::Project { exprs, .. } => exprs.iter().any(Expr::can_raise),
         LogicalPlan::Aggregate { aggs, .. } => !aggs.is_empty(),
         LogicalPlan::Values { rows, .. } => rows.iter().flatten().any(Expr::can_raise),
-        LogicalPlan::Unnest(u) => u.collections.iter().any(Expr::can_raise) || u.outer.as_ref().is_some_and(Cond::can_raise),
+        // A JSON_TABLE's columns may raise of any operands.
+        LogicalPlan::Unnest(u) => {
+            u.json.is_some() || u.collections.iter().any(Expr::can_raise) || u.outer.as_ref().is_some_and(Cond::can_raise)
+        }
         LogicalPlan::Window(w) => w.can_raise(),
         LogicalPlan::Recognize(r) => r.can_raise(),
         // Past EXECUTOR.MAX_ITERATIONS, its iteration is refused; a count

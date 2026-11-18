@@ -74,7 +74,7 @@ pub(super) fn bound(
         if !preserves_left {
             return Err(rule("[ISO/IEC 9075-2:2023 §7.10 SR9d] a join whose second operand is partitioned is LEFT or FULL")).or_at(p.at);
         }
-        let refused = "[ISO/IEC 9075-2:2023 §7.10 SR9d] a partitioned second operand references the first in a collection derived table";
+        let refused = "[ISO/IEC 9075-2:2023 §7.10 SR9d] a partitioned second operand references the first in a collection derived table or a <JSON table>";
         not_lateral(right, &from.items, start..start.saturating_add(width), refused).or_at(p.at)?;
     }
     let first = first.as_ref().map(|p| partitioning(b, p, left, from)).transpose()?;

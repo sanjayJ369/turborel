@@ -71,7 +71,7 @@ pub use json::{
     Construction, IsJsonCall, JSON_ARRAY, JSON_ARRAYAGG, JSON_EXISTS, JSON_OBJECT, JSON_OBJECTAGG, JSON_QUERY, JSON_VALUE,
     JsonArrayAggregate, JsonCall, JsonConstruct, JsonObjectAggregate, JsonOperation, ValueSlot,
 };
-pub(crate) use json::{input_type, json_text, name_type, output_type};
+pub(crate) use json::{binary_json, input_type, json_text, name_type, output_type};
 mod regex;
 mod registry;
 mod rows;

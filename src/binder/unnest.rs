@@ -13,8 +13,13 @@
 //! `LogicalPlan::Unnest`, of an inner join too, and of a LEFT join whose
 //! second operand it is, whose condition it is then given. A RIGHT or FULL
 //! join's second operand reads nothing of its first [§7.10 SR4].
+//!
+//! A `<JSON table>` [§7.11] supports lateral join too [SR5], and is bound
+//! to an item of the same kind (`binder/json/table.rs`), its operands its
+//! collections and its rows a `json::Table`'s, so it is planned so.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use super::composite::integer;
 use super::from::{Bounds, From, FromItem, Join, Tree, leaf, renamed, tree_items};
@@ -23,6 +28,7 @@ use super::{Binder, Context, Scope, rule};
 use crate::ast::{JoinKind, UnnestTable};
 use crate::catalog::{ColumnDesc, QualifiedName, TableDesc};
 use crate::error::{Code, Result, SqlError};
+use crate::json::Table;
 use crate::logical::{Cond, Expr, LogicalPlan, OuterJoin, Truth, Unnest, map_cond_columns, map_expr_columns};
 use crate::value::DataType;
 
@@ -38,6 +44,19 @@ pub(super) struct Unnested {
     ordinality: bool,
     /// The columns of the FROM row its collections reference.
     pub(super) reads: BTreeSet<usize>,
+    /// \[DESIGN\] Of a `<JSON table>` [ISO/IEC 9075-2:2023 §7.11], which
+    /// supports lateral join as a collection derived table does [§7.6
+    /// SR5], what makes its rows of the values of its operands, its
+    /// `collections`; none of a collection derived table.
+    json: Option<Arc<Table>>,
+}
+
+impl Unnested {
+    /// A `<JSON table>`, bound: its operands, `table` and the columns of the
+    /// FROM row its operands reference, `reads`.
+    pub(super) fn json(operands: Vec<Expr>, table: Arc<Table>, reads: BTreeSet<usize>) -> Unnested {
+        Unnested { collections: operands, spread: Vec::new(), ordinality: false, reads, json: Some(table) }
+    }
 }
 
 /// [ISO/IEC 9075-2:2023 §7.6 SR8c, SR8e] The collections of `table`, bound
@@ -73,6 +92,20 @@ fn collections_of(binder: &Binder<'_>, table: &UnnestTable) -> Result<(Vec<Expr>
 /// `from` [SR20a], each an array, or one multiset alone [SR8c, SR8e], its
 /// columns named by its derived column list, else as SR8m ii names them.
 pub(super) fn unnest_item(bounds: Bounds<'_>, table: &UnnestTable, offset: usize, from: &mut From) -> Result<FromItem> {
+    let binder = lateral_binder(bounds, from);
+    let (collections, types) = collections_of(&binder, table)?;
+    let reads = binder.used.into_inner();
+    from.used.extend(reads.iter().copied());
+    let spread = types.iter().map(|element| if let DataType::Row(row) = element { Some(row.fields.len()) } else { None }).collect();
+    let columns = columns_of(&types, table)?;
+    let unnested = Unnested { collections, spread, ordinality: table.ordinality, reads, json: None };
+    Ok(lateral_item((&table.correlation, table.at), columns, offset, unnested))
+}
+
+/// [ISO/IEC 9075-2:2023 §7.6 SR20a] The binder of a table primary that
+/// supports lateral join, of the FROM clause `from` bound before it: over
+/// every item of `from`, each column it sees unqualified seen so.
+pub(super) fn lateral_binder<'a>(bounds: Bounds<'a>, from: &From) -> Binder<'a> {
     let mut ids: Vec<usize> = (0..from.items.len()).collect();
     ids.sort_by_key(|&i| from.items.get(i).map_or(0, |it| it.offset));
     let items: Vec<FromItem> = ids.iter().filter_map(|&i| from.items.get(i)).cloned().collect();
@@ -82,13 +115,14 @@ pub(super) fn unnest_item(bounds: Bounds<'_>, table: &UnnestTable, offset: usize
     let names = items.iter().flat_map(FromItem::row_names).collect();
     // [ISO/IEC 9075-2:2023 §6.14 SR1] none of its rows draws a value.
     let cx = Context { draws: false, ..bounds.cx };
-    let binder = Binder::new(cx, bounds.outer, (items, names, visible), BTreeSet::new());
-    let (collections, types) = collections_of(&binder, table)?;
-    let reads = binder.used.into_inner();
-    from.used.extend(reads.iter().copied());
-    let spread = types.iter().map(|element| if let DataType::Row(row) = element { Some(row.fields.len()) } else { None }).collect();
-    let columns = columns_of(&types, table)?;
-    let name = QualifiedName { auth: String::new(), ident: table.correlation.clone() };
+    Binder::new(cx, bounds.outer, (items, names, visible), BTreeSet::new())
+}
+
+/// The FROM item of a table primary that supports lateral join, of the
+/// correlation name written at `at`, of `columns`, its first column at
+/// `offset`, its rows `unnested` makes.
+pub(super) fn lateral_item((correlation, at): (&str, usize), columns: Vec<ColumnDesc>, offset: usize, unnested: Unnested) -> FromItem {
+    let name = QualifiedName { auth: String::new(), ident: correlation.to_owned() };
     let desc = TableDesc {
         periods: Vec::new(),
         typed: None,
@@ -100,18 +134,18 @@ pub(super) fn unnest_item(bounds: Bounds<'_>, table: &UnnestTable, offset: usize
         generation: 0,
         temporary: None,
     };
-    Ok(FromItem {
+    FromItem {
         table: name,
-        at: table.at,
-        correlation: Some(table.correlation.clone()),
+        at,
+        correlation: Some(correlation.to_owned()),
         desc,
         offset,
-        source: Source::Unnest(Box::new(Unnested { collections, spread, ordinality: table.ordinality, reads })),
+        source: Source::Unnest(Box::new(unnested)),
         nullable: false,
         common: Vec::new(),
         drawn: None,
         family: Vec::new(),
-    })
+    }
 }
 
 /// [ISO/IEC 9075-2:2023 §7.6 SR8m] The columns of `u`, of collections of
@@ -204,6 +238,14 @@ fn broken(what: &str) -> SqlError {
     SqlError::new(Code::Api, format!("[DESIGN] {what}"))
 }
 
+/// A table primary that supports lateral join of a RIGHT or FULL join,
+/// referencing a table reference outside it, which is not planned.
+const OUTSIDE_RIGHT: &str =
+    "a collection derived table or a <JSON table> that references a table reference outside the RIGHT or FULL join it is in";
+/// One of a join nested in the second operand of a LEFT join, referencing
+/// its first operand, which is not planned.
+const INSIDE_LEFT: &str = "a collection derived table or a <JSON table> that references the first operand of a LEFT join it is nested in";
+
 /// Valid SQL beyond what this implementation plans.
 fn beyond(what: &str) -> SqlError {
     SqlError::new(Code::Unsupported, format!("[DESIGN] {what} is valid SQL but is not implemented"))
@@ -254,7 +296,7 @@ fn joined(binder: &Binder<'_>, j: &Join, begins: usize, prefix: Option<Placed>) 
         JoinKind::Cross | JoinKind::Inner | JoinKind::Left => placed(binder, &j.left, prefix)?,
         JoinKind::Right | JoinKind::Full | JoinKind::Union => {
             if prefix.is_some() || !contained(&j.left, items) || !contained(&j.right, items) {
-                return Err(beyond("a collection derived table that references a table reference outside the RIGHT or FULL join it is in"));
+                return Err(beyond(OUTSIDE_RIGHT));
             }
             placed(binder, &j.left, None)?
         }
@@ -280,7 +322,7 @@ fn joined(binder: &Binder<'_>, j: &Join, begins: usize, prefix: Option<Placed>) 
                 return Ok(commons(j, Placed { plan, base }, begins));
             }
             if !contained(&j.right, items) {
-                return Err(beyond("a collection derived table that references the first operand of a LEFT join it is nested in"));
+                return Err(beyond(INSIDE_LEFT));
             }
             (OuterJoin::Left, left)
         }
@@ -333,6 +375,6 @@ fn unnested(
     let end = it.offset.saturating_add(it.width());
     let names = binder.names.get(it.offset..end).ok_or_else(|| broken("the FROM row lost a column name"))?.to_vec();
     let collections = u.collections.iter().map(|e| map_expr_columns(e.clone(), &|c| c.saturating_sub(base))).collect();
-    let unnest = Unnest { collections, spread: u.spread.clone(), ordinality: u.ordinality, outer, names, input };
+    let unnest = Unnest { collections, spread: u.spread.clone(), ordinality: u.ordinality, outer, names, input, json: u.json.clone() };
     Ok(LogicalPlan::Unnest(Box::new(unnest)))
 }

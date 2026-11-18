@@ -158,7 +158,11 @@ impl LogicalPlan {
                 let n = inner(&u.input);
                 let c: Vec<String> = u.collections.iter().map(|e| render_expr(e, &n)).collect();
                 let left = if u.outer.is_some() { "Left unnest" } else { "Unnest" };
-                writeln!(out, "{pad}{left} {}{}", c.join(", "), if u.ordinality { " with ordinality" } else { "" })
+                if u.json.is_some() {
+                    writeln!(out, "{pad}{left} JSON_TABLE of {} as ({})", c.join(", "), u.names.join(", "))
+                } else {
+                    writeln!(out, "{pad}{left} {}{}", c.join(", "), if u.ordinality { " with ordinality" } else { "" })
+                }
             }
             LogicalPlan::Window(w) => writeln!(out, "{pad}{}", w.render(&inner(&w.input))),
             LogicalPlan::Recognize(r) => writeln!(out, "{pad}{}", r.render(&inner(&r.input))),

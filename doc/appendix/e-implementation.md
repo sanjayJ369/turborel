@@ -51,6 +51,7 @@ choices:
 | An array type's maximum cardinality written without one; the greatest | 65,535; 65,535 |
 | The names of a row's fields made of values, as by ROW(...) | F1, F2 and so on, by place, described as UNNAMED |
 | UNNEST's ordinality column | INTEGER |
+| A JSON_TABLE column FOR ORDINALITY | INTEGER |
 | A distinct type's source of an exact or an approximate type | NUMERIC of its precision and scale; FLOAT of its precision |
 | The SQL-path, where a function's name not qualified is found | the schema of the statement's names, the session's default schema or a schema statement's own |
 | A session's transform group of a distinct type | the one its definition makes, so a value goes to and from the host as its source's |
@@ -72,6 +73,7 @@ choices:
 | A constructor's input of a type it does not keep, as a date | cast to CHARACTER VARYING(32767) |
 | An element FORMAT JSON of JSON_ARRAY or JSON_ARRAYAGG | parsed WITHOUT UNIQUE KEYS |
 | The order of JSON_ARRAYAGG's elements without ORDER BY | as the rows are read |
+| What a JSON_TABLE's nested path reads | its parent row's item as that JSON text, of a character string as long as the text; an item of none, a datetime, gives it no row, or is SQLSTATE 22032 ERROR ON ERROR |
 
 [CONFORMANCE.md](../../CONFORMANCE.md) lists each choice with the rule
 it is of.

@@ -56,9 +56,10 @@ behind it, and each can be replaced or added to.
   with SEARCH and CYCLE, and row pattern recognition (MATCH_RECOGNIZE).
 - Arrays, row types, distinct types, DECFLOAT, regular expressions,
   sequences and identity columns.
-- SQL/JSON's JSON_VALUE, JSON_QUERY and JSON_EXISTS, over JSON text, with
-  the SQL/JSON path language, strict and lax, and its filters; IS JSON,
-  JSON_OBJECT, JSON_ARRAY, JSON_OBJECTAGG and JSON_ARRAYAGG.
+- SQL/JSON's JSON_VALUE, JSON_QUERY and JSON_EXISTS, and JSON_TABLE with
+  nested paths and plans, over JSON text, with the SQL/JSON path language,
+  strict and lax, and its filters; IS JSON, JSON_OBJECT, JSON_ARRAY,
+  JSON_OBJECTAGG and JSON_ARRAYAGG.
 - Multisets, with MULTISET UNION, EXCEPT and INTERSECT, MEMBER,
   SUBMULTISET and IS A SET, and COLLECT, FUSION and INTERSECTION.
 - Structured types with attributes, methods and subtypes, typed tables

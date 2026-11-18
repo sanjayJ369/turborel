@@ -39,8 +39,12 @@ impl Plan {
                 left.can_raise() || (!proved && cond.as_ref().is_some_and(Cond::can_raise))
             }
             Plan::Distinct { input } | Plan::Sort { input, .. } => input.can_raise(),
+            // A JSON_TABLE's columns may raise of any operands.
             Plan::Unnest(u) => {
-                u.collections.iter().any(Expr::can_raise) || u.outer.as_ref().is_some_and(Cond::can_raise) || u.input.can_raise()
+                u.json.is_some()
+                    || u.collections.iter().any(Expr::can_raise)
+                    || u.outer.as_ref().is_some_and(Cond::can_raise)
+                    || u.input.can_raise()
             }
             Plan::Window { window, .. } => window.can_raise() || window.input.can_raise(),
             // Its search can always pass the matcher's limits.

@@ -114,9 +114,11 @@ impl Plan {
             Plan::Transition { .. } => writeln!(out, "{pad}Transition table"),
             Plan::Unnest(u) => writeln!(
                 out,
-                "{pad}{}Unnest of {} collections{}",
+                "{pad}{}Unnest of {}{} {}{}",
                 if u.outer.is_some() { "LeftOuter" } else { "" },
+                if u.json.is_some() { "a JSON_TABLE of " } else { "" },
                 u.collections.len(),
+                if u.json.is_some() { "operands" } else { "collections" },
                 if u.ordinality { " with ordinality" } else { "" }
             ),
             Plan::Window { detail, .. } | Plan::Recognize { detail, .. } => writeln!(out, "{pad}{detail}"),

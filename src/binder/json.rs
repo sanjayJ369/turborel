@@ -20,11 +20,15 @@
 
 mod construct;
 
+mod table;
+
+pub(super) use table::json_table_item;
+
 use std::sync::Arc;
 
 use super::expression::nondeterministic_source;
 use super::{Binder, Scope, rule};
-use crate::ast::{JsonClauses, JsonExpression, JsonOperator, JsonValueBehavior, TypeName, ValueExpression};
+use crate::ast::{JsonClauses, JsonCommon, JsonExpression, JsonOperator, JsonValueBehavior, TypeName, ValueExpression};
 use crate::error::{At, Result};
 use crate::functions::{
     JSON_EXISTS, JSON_QUERY, JSON_VALUE, JsonCall, JsonOperation, ScalarRef, ValueSlot, input_type, json_text, output_type,
@@ -95,7 +99,7 @@ impl Binder<'_> {
         for (argument, t) in j.common.passing.iter().zip(types.iter().skip(1)) {
             input_type(t, argument.input.format, PASSED).or_at(argument.at)?;
         }
-        starts_with_arguments(j, path, types)?;
+        starts_with_arguments(&j.common, path, types)?;
         let JsonClauses::Value { returning, .. } = &j.clauses else { return Ok(()) };
         let to = value_type(returning.as_ref())?;
         let defaults = exprs.iter().zip(types).skip(j.common.passing.len().saturating_add(1));
@@ -198,18 +202,18 @@ const CONTEXT_RULE: &str = "[ISO/IEC 9075-2:2023 §10.14 SR1] the context item o
 const PASSED: &str = "a PASSING argument";
 
 /// [§9.46 SR8] That each named variable of `path` that is a `<JSON starts
-/// with initial>` is equivalent to an argument of `j` that is a character
-/// string, of `types` after the context item's, without FORMAT JSON: the
-/// first of its name, as the path takes it \[GR11b\].
+/// with initial>` is equivalent to an argument of `common` that is a
+/// character string, of `types` after the context item's, without FORMAT
+/// JSON: the first of its name, as the path takes it \[GR11b\].
 ///
 /// # Errors
 ///
 /// SQLCODE -103 if one is not.
-fn starts_with_arguments(j: &JsonOperator, path: &Path, types: &[DataType]) -> Result<()> {
+fn starts_with_arguments(common: &JsonCommon, path: &Path, types: &[DataType]) -> Result<()> {
     let mut initials = Vec::new();
     expr_initials(&path.expr, &mut initials);
     for name in initials {
-        let argument = j.common.passing.iter().zip(types.iter().skip(1)).find(|(argument, _)| argument.name == name);
+        let argument = common.passing.iter().zip(types.iter().skip(1)).find(|(argument, _)| argument.name == name);
         let Some((argument, t)) = argument else { continue };
         if argument.input.format.is_some() || !t.is_character() {
             return Err(rule(format!(

@@ -1366,8 +1366,32 @@ aggregate of its query's rows, as ARRAY by query is. What an aggregate
 holds is bounded by the members and elements one may make, `MAX_MEMBERS`
 and `MAX_ELEMENTS`. An input that is a JSON-returning function, a
 constructor or JSON_QUERY, is FORMAT JSON implicitly [§10.12 SR4a], so
-constructors nest. JSON_TABLE is to call the same engine as the query
-operators.
+constructors nest.
+
+JSON_TABLE [§7.11] is defined by a transformation into a query of
+LATERAL derived tables, one of each `<JSON table columns clause>`, a
+`<JSON table primitive>`, joined as its plan says. The query is not
+built: each would be planned and run apart, and a nested primitive would
+read its parent's row through a chaining column of its own. The rules
+are followed directly, with the transformation's results, by a
+`json::Table` (`json/table.rs`): each primitive's items are what §9.47
+gives of its context item, its columns are found of each by the rules
+JSON_VALUE and JSON_QUERY apply [§9.48, §9.49], and its plan is walked
+as the joins combine rows, OUTER, INNER, UNION and CROSS, a row at a
+time. A nested primitive's context item is its parent row's item
+serialized as JSON text and parsed again, as the chaining column has it,
+so an item of no text, a datetime, gives it no row as the
+transformation's would; the operands after the first of a CROSS are
+held, each read once, the first streamed. The binder parses every path
+once, checks §7.11's Syntax Rules, and binds the context item, the
+PASSING arguments and the DEFAULTs as operands of an item that supports
+lateral join (`binder/json/table.rs`). Its node is the collection
+derived table's, `LogicalPlan::Unnest`, whose `json` is the table and
+whose collections are those operands, so every rewrite that maps,
+decorrelates or bounds a lateral table's operands treats both alike; a
+JSON table can always raise an error, as its columns' casts can, so no
+rewrite leaves rows of it unread. It is a potential source of
+non-determinism too [§9.16 SR1u], so a constraint holds none.
 
 #### D33. Schema changes are transactional
 

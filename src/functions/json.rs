@@ -21,7 +21,7 @@ mod operands;
 
 pub use aggregate::{JsonArrayAggregate, JsonObjectAggregate};
 pub use construct::{Construction, IsJsonCall, JSON_ARRAY, JSON_ARRAYAGG, JSON_OBJECT, JSON_OBJECTAGG, JsonConstruct};
-pub(crate) use operands::{input_type, json_text, name_type, output_type};
+pub(crate) use operands::{binary_json, input_type, json_text, name_type, output_type};
 
 use super::ScalarFunction;
 use crate::error::{Code, Result, SqlError};

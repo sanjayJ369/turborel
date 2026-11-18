@@ -33,7 +33,7 @@ pub(crate) fn output_type(written: Option<&JsonOutput>, function: &str) -> Resul
         return Err(rule(format!("[ISO/IEC 9075-2:2023 §10.13 SR2] the <JSON output clause> of {function} is of a string type")));
     };
     if t.is_binary() {
-        return Err(binary(&format!("{function} RETURNING {t}")));
+        return Err(binary_json(&format!("{function} RETURNING {t}")));
     }
     if !t.is_character() {
         return Err(rule(format!("[ISO/IEC 9075-2:2023 §10.13 SR2] the <JSON output clause> of {function} is of a string type, not {t}")));
@@ -55,7 +55,7 @@ pub(crate) fn output_type(written: Option<&JsonOutput>, function: &str) -> Resul
 /// written \[SR8\].
 pub(crate) fn json_text(t: &DataType, format: Option<JsonFormat>, cited: &str) -> Result<()> {
     if t.is_binary() {
-        return Err(binary(&format!("JSON text of {t}")));
+        return Err(binary_json(&format!("JSON text of {t}")));
     }
     if !t.is_character() {
         return Err(rule(format!("{cited}, not {t}")));
@@ -123,7 +123,7 @@ pub(crate) fn name_type(t: &DataType, function: &str) -> Result<()> {
 
 /// The error of `what`, of a binary string type, valid but not
 /// implemented (RULES.md D18).
-fn binary(what: &str) -> SqlError {
+pub(crate) fn binary_json(what: &str) -> SqlError {
     SqlError::new(
         Code::Unsupported,
         format!("[DESIGN] {what}, a binary string type, FORMAT JSON ENCODING, is valid SQL but is not implemented (RULES.md D18)"),

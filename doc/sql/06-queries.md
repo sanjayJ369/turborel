@@ -276,6 +276,143 @@ OK
 (2 rows)
 ```
 
+## JSON_TABLE
+
+JSON_TABLE in the FROM clause gives what an SQL/JSON path finds in JSON
+text as rows, a row of each item, with a column of each value read from
+the item. The path and the PASSING clause are as
+[JSON_VALUE](04-expressions.md#sqljson)'s:
+
+```
+JSON_TABLE(text [FORMAT JSON], 'path' [AS name] [PASSING value [FORMAT JSON] AS name, ...]
+           COLUMNS (column, ...)
+           [PLAN (plan) | PLAN DEFAULT (INNER | OUTER [, UNION | CROSS])]
+           [ERROR | EMPTY ON ERROR])
+  [AS] correlation [(column name, ...)]
+
+column ::=
+    name FOR ORDINALITY
+  | name type [PATH 'path'] [behavior ON EMPTY] [behavior ON ERROR]
+  | name type FORMAT JSON [PATH 'path'] [WITHOUT [ARRAY] | WITH [CONDITIONAL | UNCONDITIONAL] [ARRAY] WRAPPER]
+         [KEEP | OMIT QUOTES [ON SCALAR STRING]] [behavior ON EMPTY] [behavior ON ERROR]
+  | NESTED [PATH] 'path' [AS name] COLUMNS (column, ...)
+
+plan ::= name | name OUTER primary | name INNER primary
+       | primary UNION primary [UNION primary ...] | primary CROSS primary [CROSS primary ...]
+primary ::= name | (plan)
+```
+
+A column FOR ORDINALITY numbers the rows from 1, of type INTEGER. A
+column of a type is the value its path finds in the row's item, as
+JSON_VALUE gives it, of a character string, numeric, BOOLEAN or datetime
+type; one FORMAT JSON is the item written as JSON text, as JSON_QUERY
+gives it, of a character string type, with its wrapper and quotes. A
+column of no PATH reads the member of its name: its name as SQL reads
+it, upper case unless it is delimited, so `buyer` reads `"BUYER"` and
+`"buyer"` reads `"buyer"`. A column's path takes no PASSING variable. Its
+behaviors ON EMPTY and ON ERROR are JSON_VALUE's or JSON_QUERY's,
+ON EMPTY NULL if not written, and ON ERROR NULL, or ERROR if the table
+says ERROR ON ERROR.
+
+NESTED reads its path in the item of each row of the columns it is in,
+its own columns' rows joined to that row. A row whose item gives none is
+kept, its nested columns null. The rows of nested columns side by side
+are each one's in turn, the others' columns null. JSON_TABLE reads the
+tables before it in the FROM clause, each of their rows giving its own
+rows, as UNNEST does; text that is null gives none, and a LEFT join keeps
+the row.
+
+```sql
+CREATE TABLE BASKETS (ID INTEGER PRIMARY KEY, DOC VARCHAR(300));
+INSERT INTO BASKETS VALUES (1, '{"buyer":"Ada","items":[{"sku":"A1","qty":2,"tags":["red"]},{"sku":"B7","qty":1}]}'),
+                           (2, '{"buyer":"Grace","items":[]}'), (3, NULL),
+                           (4, '{"buyer":"Edsger","items":[{"sku":"C3","qty":"many"}]}');
+SELECT B.ID, J.* FROM BASKETS B,
+       JSON_TABLE(B.DOC, 'lax $' COLUMNS (BUYER VARCHAR(10) PATH 'lax $.buyer',
+         NESTED PATH 'lax $.items[*]' COLUMNS (N FOR ORDINALITY, SKU VARCHAR(5) PATH 'lax $.sku',
+           QTY INTEGER PATH 'lax $.qty' DEFAULT 0 ON ERROR, TAGS VARCHAR(20) FORMAT JSON PATH 'lax $.tags'))) AS J
+  ORDER BY B.ID, J.N;
+SELECT B.ID, J.SKU FROM BASKETS B LEFT JOIN JSON_TABLE(B.DOC, 'lax $.items[*]' COLUMNS (SKU VARCHAR(5) PATH 'lax $.sku')) AS J
+  ON TRUE ORDER BY B.ID, J.SKU;
+```
+
+```
+OK
+OK
+           ID | BUYER      |            N | SKU   |          QTY | TAGS
+--------------+------------+--------------+-------+--------------+----------------------
+            1 | Ada        |            1 | A1    |            2 | ["red"]
+            1 | Ada        |            2 | B7    |            1 | NULL
+            2 | Grace      |         NULL | NULL  |         NULL | NULL
+            4 | Edsger     |            1 | C3    |            0 | NULL
+(4 rows)
+           ID | SKU
+--------------+-------
+            1 | A1
+            1 | B7
+            2 | NULL
+            3 | NULL
+            4 | C3
+(5 rows)
+```
+
+PLAN DEFAULT changes how rows are joined: INNER drops a row whose item
+gives its nested columns no row, and CROSS gives every combination of
+the rows of nested columns side by side. PLAN names the paths, the row
+path by its AS name and each NESTED by its own: each is named once, and
+a NESTED path is the second operand of the OUTER or INNER whose first is
+the path it is in. A JSON_TABLE with a PLAN clause names every NESTED
+path.
+
+```sql
+SELECT J.* FROM JSON_TABLE('{"name":"Ann","pets":["cat","dog"],"phones":["111"]}', 'lax $' AS P COLUMNS (NAME VARCHAR(5) PATH 'lax $.name',
+         NESTED PATH 'lax $.pets[*]' AS PETS COLUMNS (PET VARCHAR(5) PATH 'lax $'),
+         NESTED PATH 'lax $.phones[*]' AS PHONES COLUMNS (PHONE VARCHAR(5) PATH 'lax $'))) AS J ORDER BY J.PET, J.PHONE;
+SELECT J.* FROM JSON_TABLE('{"name":"Ann","pets":["cat","dog"],"phones":["111"]}', 'lax $' AS P COLUMNS (NAME VARCHAR(5) PATH 'lax $.name',
+         NESTED PATH 'lax $.pets[*]' AS PETS COLUMNS (PET VARCHAR(5) PATH 'lax $'),
+         NESTED PATH 'lax $.phones[*]' AS PHONES COLUMNS (PHONE VARCHAR(5) PATH 'lax $'))
+       PLAN (P OUTER (PETS CROSS PHONES))) AS J ORDER BY J.PET;
+```
+
+```
+ NAME  | PET   | PHONE
+-------+-------+-------
+ Ann   | cat   | NULL
+ Ann   | dog   | NULL
+ Ann   | NULL  | 111
+(3 rows)
+ NAME  | PET   | PHONE
+-------+-------+-------
+ Ann   | cat   | 111
+ Ann   | dog   | 111
+(2 rows)
+```
+
+An error of a path's rows, as text that is no JSON or strict mode not
+finding a member, gives no row, EMPTY ON ERROR, the default, and is
+raised ERROR ON ERROR. Two columns or paths of one name, a type a column
+does not take, a plan that does not name each path once and a variable
+a column's path names are errors as the statement is prepared. A row
+pattern recognition after a JSON_TABLE is valid SQL turborel does not
+process: SQLCODE -900. The standard counts JSON_TABLE as possibly
+non-deterministic, so a CHECK constraint holds none in a subquery,
+SQLCODE -103. JSON_TABLE and the words of its clauses are not reserved,
+so a table or column may be named any of them.
+
+```sql
+SELECT * FROM JSON_TABLE('{"a":', 'lax $' COLUMNS (A INTEGER)) AS J;
+SELECT * FROM JSON_TABLE('{"a":', 'lax $' COLUMNS (A INTEGER) ERROR ON ERROR) AS J;
+SELECT * FROM JSON_TABLE('[1]', 'lax $' COLUMNS (A INTEGER, A VARCHAR(5))) AS J;
+```
+
+```
+            A
+--------------
+(0 rows)
+turborel: SQLCODE -301 (SQLSTATE 22032): the string is not a JSON text: a value is missing (at character 6) [ISO/IEC 9075-2:2023 §9.42 GR3a iii 1]
+turborel: SQLCODE -103 (SQLSTATE 2A000): A is the name of two of the columns and paths of a JSON_TABLE, which are distinct [ISO/IEC 9075-2:2023 §7.11 SR1h] (at character 60)
+```
+
 ## Polymorphic table functions
 
 TABLE ( an invocation ) in the FROM clause invokes a polymorphic table

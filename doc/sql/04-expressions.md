@@ -861,7 +861,8 @@ OK
 JSON_VALUE and JSON_QUERY take a value out of JSON text, a character
 string, by an SQL/JSON path expression;
 [JSON_EXISTS](05-predicates.md#json_exists) tests whether the path
-finds anything. Each is written as
+finds anything, and [JSON_TABLE](06-queries.md#json_table) in a FROM
+clause gives what it finds as rows. Each is written as
 
 ```
 JSON_VALUE(text [FORMAT JSON], 'path' [PASSING value [FORMAT JSON] AS name, ...]

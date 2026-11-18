@@ -16,13 +16,17 @@
 //! in the stratum's tables, so it has a fixpoint [NOTE 317]. A UNION JOIN
 //! is a FULL one on a condition never true, and is held to F as one.
 
+mod recognizes;
+
 use std::collections::BTreeSet;
+
+use recognizes::recognizes;
 
 use super::rule;
 use super::set_functions::is_aggregate_call;
 use crate::ast::{
     Correspondence, JoinKind, JoinSpecification, QueryExpression, QuerySpecification, RowElement, SearchCondition, SelectItem, SelectList,
-    SelectSublist, SetOperator, Subquery, TableReference, ValueExpression, WindowOver, WithElement, WithQuery,
+    SelectSublist, SetOperator, Subquery, TableReference, ValueExpression, WithElement, WithQuery,
 };
 use crate::db::State;
 use crate::error::{Code, Result, SqlError};
@@ -169,6 +173,7 @@ impl<'w> Rules<'w> {
                 }
                 n
             }
+            TableReference::JsonTable(j) => j.subqueries().into_iter().fold(0_usize, |n, s| n.saturating_add(self.refs(&s.query, scope))),
             TableReference::Recognized(r) => {
                 let mut n = self.reference_refs(&r.input, scope);
                 r.clause.for_each_subquery(&mut |s| n = n.saturating_add(self.refs(&s.query, scope)));
@@ -319,6 +324,7 @@ impl<'w> Rules<'w> {
                 }
                 self.elsewhere(subqueries, scope)
             }
+            TableReference::JsonTable(j) => self.elsewhere(j.subqueries(), scope),
             TableReference::Recognized(r) => {
                 let mut subqueries = Vec::new();
                 r.clause.for_each_subquery(&mut |s| subqueries.push(s));
@@ -510,6 +516,7 @@ fn any_query(q: &QueryExpression, pred: &dyn Fn(&QueryExpression) -> bool) -> bo
                             v.for_each_subquery(&mut |s| nested.push(&s.query));
                         }
                     }
+                    TableReference::JsonTable(j) => nested.extend(j.subqueries().into_iter().map(|s| &s.query)),
                     TableReference::Joined(j) => refs.extend([&j.left, &j.right]),
                     TableReference::Recognized(r) => {
                         refs.push(&r.input);
@@ -523,34 +530,6 @@ fn any_query(q: &QueryExpression, pred: &dyn Fn(&QueryExpression) -> bool) -> bo
         }
     }
     nested.into_iter().any(|n| any_query(n, pred))
-}
-
-/// [ISO/IEC 9075-2:2023 §7.17 SR3f] Whether `q` is a query specification
-/// that simply contains row pattern recognition: of a table primary, or
-/// of a window of its window clause or its select list.
-fn recognizes(q: &QueryExpression) -> bool {
-    let QueryExpression::Spec(spec) = q else { return false };
-    let te = &spec.table_expression;
-    if te.window.iter().any(|d| d.specification.recognition.is_some()) {
-        return true;
-    }
-    let inline = |v: &ValueExpression| {
-        let ValueExpression::Window(w) = v else { return false };
-        let WindowOver::Specification(s) = &w.over else { return false };
-        s.recognition.is_some()
-    };
-    if selected(spec).into_iter().any(|v| v.any(&inline)) {
-        return true;
-    }
-    let mut refs: Vec<&TableReference> = te.from.iter().collect();
-    while let Some(r) = refs.pop() {
-        match r {
-            TableReference::Recognized(_) => return true,
-            TableReference::Joined(j) => refs.extend([&j.left, &j.right]),
-            TableReference::Table(_) | TableReference::Derived(_) | TableReference::Unnest(_) | TableReference::Polymorphic(_) => {}
-        }
-    }
-    false
 }
 
 /// The value expressions of the select list of `spec`.

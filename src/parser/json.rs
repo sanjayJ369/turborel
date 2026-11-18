@@ -12,6 +12,8 @@
 
 mod construct;
 
+mod table;
+
 use super::Parser;
 use super::dynamic::WITHOUT;
 use super::ptf::KEEP;
